@@ -12,6 +12,23 @@
 #    See the License for the specific language governing permissions and
 #    limitations under the License.
 
+import math
+import torch
+import torch.nn as nn
+from torch.nn import init
+
+# Workaround for PyTorch 2.0.1 float16 uniform_ decompose bug
+_orig_kaiming_uniform_ = init.kaiming_uniform_
+def _patched_kaiming_uniform_(tensor, a=0, mode='fan_in', nonlinearity='leaky_relu'):
+    if tensor.dtype in (torch.float16, torch.bfloat16):
+        tensor_f32 = tensor.float()
+        _orig_kaiming_uniform_(tensor_f32, a, mode, nonlinearity)
+        with torch.no_grad():
+            tensor.copy_(tensor_f32)
+    else:
+        _orig_kaiming_uniform_(tensor, a, mode, nonlinearity)
+init.kaiming_uniform_ = _patched_kaiming_uniform_
+
 from typing import List, Optional, Tuple, Union
 
 import torch

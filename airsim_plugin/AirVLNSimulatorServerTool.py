@@ -593,7 +593,8 @@ class EventHandler(object):
                     item[0] = item[0]
                 except:
                     pass
-                # item[0] = item[0].decode('utf-8')
+                if isinstance(item[0], bytes):
+                    item[0] = item[0].decode('utf-8')
             result = self._open_scenes(ip, scen_id_gpu_list)
         except Exception as e:
             print(e)

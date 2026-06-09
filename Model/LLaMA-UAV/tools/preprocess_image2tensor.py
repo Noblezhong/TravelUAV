@@ -58,6 +58,16 @@ processer = CLIPImageProcessor(**clip_config)
 
 if __name__ == "__main__":
   def worker(traj_dir):
+    if os.path.exists(os.path.join(traj_dir, 'rgb_imgs.tensor')):
+        return True
+    # Validate all camera dirs exist and have files
+    try:
+        for camera_name in RGB_FOLDER:
+            cam_dir = os.path.join(traj_dir, camera_name)
+            if not os.path.isdir(cam_dir) or not os.listdir(cam_dir):
+                return False
+    except:
+        return False
     traj_camera_list = []
     for idx,camera_name in enumerate(RGB_FOLDER):
       traj_camera_list.append(sorted([os.path.join(traj_dir, camera_name, filename) for filename in os.listdir(os.path.join(traj_dir,camera_name))]))

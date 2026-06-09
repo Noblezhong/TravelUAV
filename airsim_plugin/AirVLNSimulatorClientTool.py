@@ -169,7 +169,7 @@ class AirVLNSimulatorClientTool:
         self.airsim_clients = [[None for _ in list(item['open_scenes'])] for item in self.machines_info]
         return
 
-    def run_call(self, airsim_timeout: int=300) -> None:
+    def run_call(self, airsim_timeout: int=60) -> None:
         socket_clients = []
         for index, item in enumerate(self.machines_info):
             socket_clients.append(
@@ -198,6 +198,8 @@ class AirVLNSimulatorClientTool:
             print('waiting for airsim connection...')
             time.sleep(3 * len(self.machines_info[index]['open_scenes']) + 35)
             ip = result[1][0]
+            if isinstance(ip, bytes):
+                ip = ip.decode('utf-8')
             ports = result[1][1]
             self.airsim_ip = ip
             self.airsim_ports = ports
@@ -501,7 +503,7 @@ class AirVLNSimulatorClientTool:
                     logger.error("图片获取错误: " + str(e))
                     logger.error('time_sleep_cnt: {}'.format(time_sleep_cnt))
                     time.sleep(1)
-                if time_sleep_cnt > 10:
+                if time_sleep_cnt > 3:
                     raise Exception('图片获取失败')
             return images, depth_images
 
@@ -564,7 +566,7 @@ class AirVLNSimulatorClientTool:
                     logger.error("图片获取错误: " + str(e))
                     logger.error('time_sleep_cnt: {}'.format(time_sleep_cnt))
                     time.sleep(1)
-                if time_sleep_cnt > 10:
+                if time_sleep_cnt > 3:
                     raise Exception('图片获取失败')
             return images, depth_images
 

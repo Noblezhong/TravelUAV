@@ -169,7 +169,7 @@ class AirVLNENV:
 
     def init_VectorEnvUtil(self):
         self.delete_VectorEnvUtil()
-        self.VectorEnvUtil = VectorEnvUtil(self.scenes, self.batch_size)
+        self.VectorEnvUtil = VectorEnvUtil(self.scenes, self.batch_size, multiprocessing_start_method="fork")
 
     def delete_VectorEnvUtil(self):
         if hasattr(self, 'VectorEnvUtil'):
