@@ -3,7 +3,7 @@ set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 model_dir="${JETSON_MODEL_DIR:-$root_dir/Model/LLaMA-UAV}"
-dataset_path="${JETSON_DATASET_PATH:-$root_dir/data/TravelUAV_data/}"
+dataset_path="${JETSON_DATASET_PATH:-/mnt/traveluav_data/TravelUAV_data}"
 eval_save_path="${JETSON_EVAL_SAVE_PATH:-$root_dir/eval_output_profile_jetson}"
 eval_json_path="${JETSON_EVAL_JSON_PATH:-$dataset_path/data/uav_dataset/seen_valset.json}"
 map_spawn_area_json_path="${JETSON_MAP_SPAWN_AREA_JSON_PATH:-$dataset_path/data/meta/map_spawnarea_info.json}"
