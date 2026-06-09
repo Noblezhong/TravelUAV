@@ -12,6 +12,26 @@ dist
 
 # Data
 data/
+eval_output/
+
+# Model artifacts / checkpoints
+*.pth
+*.pt
+*.ckpt
+*.bin
+*.safetensors
+Model/LLaMA-UAV/work_dirs/
+Model/LLaMA-UAV/model_zoo/
+work_dirs/
+work_dirs
+model_zoo/
+model_zoo
+checkpoints/
+ckpts*/
+
+# Local convenience symlink
+llamavid
+
 # Editor
 .idea
 *.swp
@@ -20,12 +40,8 @@ data/
 .DS_Store
 wandb
 output
-work_dirs
 data
-model_zoo
 settings
-checkpoints
-ckpts*
 
 .ipynb_checkpoints
 *.ipynb
