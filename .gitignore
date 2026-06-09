@@ -13,6 +13,7 @@ dist
 # Data
 data/
 eval_output/
+eval_output_profile/
 
 # Model artifacts / checkpoints
 *.pth
