@@ -62,9 +62,7 @@ def _print_profile_line(step_idx, profile_info, refined_waypoints):
 
 
 def _configure_jetson_air_sim_server():
-    workstation_ip = os.environ.get("WORKSTATION_IP")
-    if not workstation_ip:
-        raise RuntimeError("WORKSTATION_IP is required on Jetson")
+    workstation_ip = "192.168.105.17"
     args.machines_info[0]["MACHINE_IP"] = workstation_ip
 
 

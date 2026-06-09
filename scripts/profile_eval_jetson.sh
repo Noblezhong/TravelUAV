@@ -1,8 +1,4 @@
 #!/bin/bash
-# Jetson-side profiling entry.
-# Requirements:
-#   export WORKSTATION_IP=<workstation LAN IP>
-
 set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -14,11 +10,6 @@ map_spawn_area_json_path="${JETSON_MAP_SPAWN_AREA_JSON_PATH:-$dataset_path/data/
 object_name_json_path="${JETSON_OBJECT_NAME_JSON_PATH:-$dataset_path/data/meta/object_description.json}"
 groundingdino_config="${JETSON_GROUNDINGDINO_CONFIG:-$root_dir/src/model_wrapper/utils/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py}"
 groundingdino_model_path="${JETSON_GROUNDINGDINO_MODEL_PATH:-$root_dir/src/model_wrapper/utils/GroundingDINO/groundingdino_swint_ogc.pth}"
-
-if [[ -z "${WORKSTATION_IP:-}" ]]; then
-    echo "WORKSTATION_IP is required. Example: export WORKSTATION_IP=192.168.1.10" >&2
-    exit 1
-fi
 
 mkdir -p "$eval_save_path"
 
