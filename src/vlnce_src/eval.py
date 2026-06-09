@@ -34,30 +34,39 @@ def eval(model_wrapper: BaseModelWrapper, assist: Assist, eval_env: AirVLNENV, e
             env_batchs = eval_env.next_minibatch()
             if env_batchs is None:
                 break
-            batch_state = EvalBatchState(batch_size=eval_env.batch_size, env_batchs=env_batchs, env=eval_env, assist=assist)
 
-            pbar.update(n=eval_env.batch_size)
-            
-            inputs, rot_to_targets = model_wrapper.prepare_inputs(batch_state.episodes, batch_state.target_positions)
+            for retry_i in range(3):
+                try:
+                    batch_state = EvalBatchState(batch_size=eval_env.batch_size, env_batchs=env_batchs, env=eval_env, assist=assist)
 
-            for t in range(int(args.maxWaypoints) + 1):
-                logger.info('Step: {} \t Completed: {} / {}'.format(t, int(eval_env.index_data)-int(eval_env.batch_size), end_iter))
+                    pbar.update(n=eval_env.batch_size)
 
-                is_terminate = batch_state.check_batch_termination(t)
-                if is_terminate:
-                    break
-                
-                refined_waypoints = model_wrapper.run(inputs=inputs, episodes=batch_state.episodes, rot_to_targets=rot_to_targets)
-                eval_env.makeActions(refined_waypoints)
-                outputs = eval_env.get_obs()
-                batch_state.update_from_env_output(outputs)
-                
-                batch_state.predict_dones = model_wrapper.predict_done(batch_state.episodes, batch_state.object_infos)
-                
-                batch_state.update_metric()
-                
-                assist_notices = batch_state.get_assist_notices()
-                inputs, _ = model_wrapper.prepare_inputs(batch_state.episodes, batch_state.target_positions, assist_notices)
+                    inputs, rot_to_targets = model_wrapper.prepare_inputs(batch_state.episodes, batch_state.target_positions)
+
+                    for t in range(int(args.maxWaypoints) + 1):
+                        logger.info('Step: {} \t Completed: {} / {}'.format(t, int(eval_env.index_data)-int(eval_env.batch_size), end_iter))
+
+                        is_terminate = batch_state.check_batch_termination(t)
+                        if is_terminate:
+                            break
+
+                        refined_waypoints = model_wrapper.run(inputs=inputs, episodes=batch_state.episodes, rot_to_targets=rot_to_targets)
+                        eval_env.makeActions(refined_waypoints)
+                        outputs = eval_env.get_obs()
+                        batch_state.update_from_env_output(outputs)
+
+                        batch_state.predict_dones = model_wrapper.predict_done(batch_state.episodes, batch_state.object_infos)
+
+                        batch_state.update_metric()
+
+                        assist_notices = batch_state.get_assist_notices()
+                        inputs, _ = model_wrapper.prepare_inputs(batch_state.episodes, batch_state.target_positions, assist_notices)
+                    break  # episode succeeded
+                except Exception as e:
+                    logger.error(f'Episode failed: {e}, retry {retry_i+1}/3')
+                    if retry_i < 2:
+                        logger.error('Restarting scene...')
+                        eval_env._changeEnv(need_change=True)
 
         try:
             pbar.close()
