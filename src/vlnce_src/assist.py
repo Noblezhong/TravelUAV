@@ -48,6 +48,8 @@ class Assist:
                 if not dones[i]:
                     dones[i] = True
                 continue
+            if len(prev_episode) == 0:
+                continue
             
             diffs = []
             close_collision = False

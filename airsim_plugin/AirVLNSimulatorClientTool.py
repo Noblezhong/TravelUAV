@@ -293,7 +293,7 @@ class AirVLNSimulatorClientTool:
         except Exception as e:
             logger.error(e)
 
-    def move_path_by_waypoints(self, waypoints_list, start_states):
+    def move_path_by_waypoints(self, waypoints_list, start_states, target_idx=5):
         velocity = 1
         drivetrain = airsim.DrivetrainType.ForwardOnly
         yaw_mode=airsim.YawMode(is_rate=False)
@@ -304,6 +304,7 @@ class AirVLNSimulatorClientTool:
             state_sensor = State(airsim_client, )
             imu_sensor = Imu(airsim_client, imu_name='Imu')
             path = [airsim.Vector3r(*waypoint[0:3]) for waypoint in waypoints]
+            target_limit = max(1, min(int(target_idx), len(path)))
             airsim_client.enableApiControl(True)
             airsim_client.armDisarm(True)
             airsim_client.simPause(False)
@@ -315,7 +316,6 @@ class AirVLNSimulatorClientTool:
                                 yaw_mode=yaw_mode, 
                                 lookahead=lookahead, 
                                 adaptive_lookahead=adaptive_lookahead)
-            target_idx = 5
             current_idx = 0
             pos_queue = deque(maxlen=20)
             start_time = time.perf_counter()
@@ -342,7 +342,7 @@ class AirVLNSimulatorClientTool:
                 if new_distance > distance:
                     results.append({'sensors': {'state': state_info, 'imu': imu_info}})
                     current_idx += 1
-                    if current_idx == target_idx:
+                    if current_idx == target_limit:
                         airsim_client.simPause(True)
                         break
                     else:
@@ -382,6 +382,122 @@ class AirVLNSimulatorClientTool:
         threads = []
         if not (np.array(thread_results) == True).all():
             logger.error('move path by waypoints failed.')
+            return None
+        if error_flag:
+            return None
+        return result_poses_list
+
+    def move_path_by_velocity_waypoints(self, waypoints_list, start_states, target_idx=1):
+        velocity = 1.0
+        control_dt = 0.05
+        arrival_radius = 0.2
+        timeout_accept_radius = 0.5
+        target_timeout = 30.0
+        drivetrain = airsim.DrivetrainType.ForwardOnly
+        yaw_mode = airsim.YawMode(is_rate=False)
+
+        def move_path(airsim_client: airsim.VehicleClient, waypoints, start_state):
+            results = []
+            state_sensor = State(airsim_client)
+            imu_sensor = Imu(airsim_client, imu_name='Imu')
+            targets = [np.asarray(waypoint[0:3], dtype=np.float64) for waypoint in waypoints]
+            target_limit = max(1, min(int(target_idx), len(targets)))
+            collision = False
+
+            airsim_client.enableApiControl(True)
+            airsim_client.armDisarm(True)
+            airsim_client.simPause(False)
+            airsim_client.simSetKinematics(start_state, ignore_collision=False)
+
+            for target in targets[:target_limit]:
+                target_start_time = time.perf_counter()
+                while True:
+                    state_info = copy.deepcopy(state_sensor.retrieve())
+                    imu_info = copy.deepcopy(imu_sensor.retrieve())
+                    position = np.asarray(state_info['position'], dtype=np.float64)
+                    delta = target - position
+                    distance = float(np.linalg.norm(delta))
+
+                    if time.perf_counter() - target_start_time > target_timeout:
+                        if distance <= timeout_accept_radius:
+                            logger.warning(
+                                f"velocity waypoint timeout but close enough: distance={distance:.2f}m, "
+                                f"timeout={target_timeout:.2f}s"
+                            )
+                            results.append({'sensors': {'state': state_info, 'imu': imu_info}})
+                            break
+                        logger.warning(
+                            f"velocity waypoint timeout: distance={distance:.2f}m, "
+                            f"timeout={target_timeout:.2f}s"
+                        )
+                        collision = True
+                        results.append({'sensors': {'state': state_info, 'imu': imu_info}})
+                        break
+
+                    if state_info.get('collision', {}).get('has_collided', False):
+                        collision = True
+                        results.append({'sensors': {'state': state_info, 'imu': imu_info}})
+                        break
+
+                    if distance <= arrival_radius:
+                        results.append({'sensors': {'state': state_info, 'imu': imu_info}})
+                        break
+
+                    direction = delta / max(distance, 1e-6)
+                    duration = min(control_dt, max(distance / velocity, 0.01))
+                    command_velocity = direction * velocity
+                    airsim_client.moveByVelocityAsync(
+                        float(command_velocity[0]),
+                        float(command_velocity[1]),
+                        float(command_velocity[2]),
+                        float(duration),
+                        drivetrain=drivetrain,
+                        yaw_mode=yaw_mode,
+                    ).join()
+
+                if collision:
+                    break
+
+            airsim_client.moveByVelocityAsync(0, 0, 0, 0.05, drivetrain=drivetrain, yaw_mode=yaw_mode).join()
+            airsim_client.simPause(True)
+            return {'states': results, 'collision': collision}
+
+        threads = []
+        thread_results = []
+        for index_1 in range(len(self.airsim_clients)):
+            threads.append([])
+            for index_2 in range(len(self.airsim_clients[index_1])):
+                threads[index_1].append(
+                    MyThread(
+                        move_path,
+                        (
+                            self.airsim_clients[index_1][index_2],
+                            waypoints_list[index_1][index_2],
+                            start_states[index_1][index_2],
+                        ),
+                    )
+                )
+        for index_1, _ in enumerate(threads):
+            for index_2, _ in enumerate(threads[index_1]):
+                threads[index_1][index_2].setDaemon(True)
+                threads[index_1][index_2].start()
+        for index_1, _ in enumerate(threads):
+            for index_2, _ in enumerate(threads[index_1]):
+                threads[index_1][index_2].join()
+
+        result_poses_list = []
+        error_flag = False
+        for index_1, _ in enumerate(threads):
+            result_poses_list.append([])
+            for index_2, _ in enumerate(threads[index_1]):
+                result = threads[index_1][index_2].get_result()
+                result_poses_list[index_1].append(result)
+                if result is None:
+                    error_flag = True
+                thread_results.append(threads[index_1][index_2].flag_ok)
+        threads = []
+        if not (np.array(thread_results) == True).all():
+            logger.error('move path by velocity waypoints failed.')
             return None
         if error_flag:
             return None
@@ -636,4 +752,3 @@ class AirVLNSimulatorClientTool:
             logger.error('getSensorInfo failed.')
             return None
         return results 
-

@@ -450,6 +450,48 @@ class AirVLNENV:
         self.update_measurements()
         return batch_results
 
+    def makeActionsChunk(self, waypoints_list, target_idx):
+        waypoints_args = []
+        cnt = 0
+        for index_1, item in enumerate(self.machines_info):
+            waypoints_args.append([])
+            for index_2, _ in enumerate(item['open_scenes']):
+                waypoints_args[index_1].append(waypoints_list[cnt])
+                cnt += 1
+        start_states = self._get_current_state()
+        results = self.simulator_tool.move_path_by_velocity_waypoints(
+            waypoints_list=waypoints_args,
+            start_states=start_states,
+            target_idx=target_idx,
+        )
+        if results is None:
+            raise Exception('move on path error.')
+
+        batch_results = []
+        batch_iscollision = []
+        for index_1, item in enumerate(self.machines_info):
+            for index_2, _ in enumerate(item['open_scenes']):
+                batch_result = results[index_1][index_2]['states']
+                batch_results.append(batch_result)
+                batch_iscollision.append(results[index_1][index_2]['collision'])
+
+        for index, waypoints in enumerate(waypoints_list):
+            for waypoint in waypoints:
+                if np.linalg.norm(np.array(waypoint) - np.array(self.batch[index]['object_position'])) < self.sim_states[index].SUCCESS_DISTANCE:
+                    self.sim_states[index].oracle_success = True
+                elif self.sim_states[index].step >= int(args.maxWaypoints):
+                    self.sim_states[index].is_end = True
+            if self.sim_states[index].is_end == True:
+                waypoints = [self.sim_states[index].pose[0:3]] * len(waypoints)
+            self.sim_states[index].step += 1
+            if len(batch_results[index]) > 0:
+                self.sim_states[index].trajectory.extend(batch_results[index])
+            self.sim_states[index].pre_waypoints = waypoints
+            self.sim_states[index].is_collisioned = batch_iscollision[index]
+
+        self.update_measurements()
+        return batch_results
+
     def update_measurements(self):
         self._update_distance_to_target()
         
@@ -458,5 +500,10 @@ class AirVLNENV:
         for idx, target_position in enumerate(target_positions):
             current_position = self.sim_states[idx].pose[0:3]
             distance = np.linalg.norm(np.array(current_position) - np.array(target_position))
-            print(f'batch[{idx}/{len(self.batch)}]| distance: {round(distance, 2)}, position: {current_position[0]}, {current_position[1]}, {current_position[2]}, target: {target_position[0]}, {target_position[1]}, {target_position[2]}')
+            if os.environ.get("TRAVELUAV_LOG_DISTANCE_DEBUG", "0") == "1":
+                logger.debug(
+                    f"batch[{idx}/{len(self.batch)}]| distance: {round(distance, 2)}, "
+                    f"position: {current_position[0]}, {current_position[1]}, {current_position[2]}, "
+                    f"target: {target_position[0]}, {target_position[1]}, {target_position[2]}"
+                )
      

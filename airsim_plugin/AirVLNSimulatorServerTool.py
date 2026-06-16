@@ -18,7 +18,7 @@ AIRSIM_SETTINGS_TEMPLATE = {
   "SeeDocsAt": "https://microsoft.github.io/AirSim/settings/",
   "SettingsVersion": 1.2,
   "SimMode": "Multirotor",
-  "ClockSpeed": 10,
+  "ClockSpeed": 1,
   "ViewMode": "NoDisplay",
   "PhysiceEngineName": "ExternalPhysicsEngine",
   "Recording": {
