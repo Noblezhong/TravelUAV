@@ -46,8 +46,7 @@ def _write_jsonl_line(handle, payload):
 
 
 def _print_profile_line(step_idx, profile_info, refined_waypoints):
-    coarse = profile_info["coarse_waypoints"]
-    refined_shape = list(np.asarray(refined_waypoints).shape)
+    llm_output = profile_info["llm_output"]
     message = (
         f"[profile] step={step_idx} "
         f"llm={profile_info['llm_latency_ms']:.3f}ms "
@@ -55,8 +54,7 @@ def _print_profile_line(step_idx, profile_info, refined_waypoints):
         f"action={profile_info['airsim_action_latency_ms']:.3f}ms "
         f"obs={profile_info['obs_latency_ms']:.3f}ms "
         f"dino={profile_info['groundingdino_latency_ms']:.3f}ms "
-        f"coarse={coarse} "
-        f"refined_shape={refined_shape}"
+        f"llm_output={llm_output}"
     )
     logger.info(message)
 
@@ -134,8 +132,8 @@ def eval(model_wrapper: ProfileTravelModelWrapper, assist: Assist, eval_env: Air
                                 "obs_latency_ms": float((obs_end - obs_start) * 1000.0),
                                 "groundingdino_latency_ms": float((dino_end - dino_start) * 1000.0),
                                 "loop_latency_ms": float((loop_end - step_start) * 1000.0),
-                                "coarse_waypoints": profile_info["coarse_waypoints"],
-                                "refined_waypoints": profile_info["refined_waypoints"],
+                                "llm_output": profile_info["llm_output"],
+                                "refined_waypoints": np.asarray(refined_waypoints).tolist(),
                                 "predict_dones": [bool(x) for x in batch_state.predict_dones],
                                 "collisions": [bool(x) for x in batch_state.collisions],
                                 "dones": [bool(x) for x in batch_state.dones],

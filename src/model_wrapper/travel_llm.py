@@ -43,7 +43,8 @@ class TravelModelWrapper(BaseModelWrapper):
         return inputs_device, rot_to_targets
 
     def run_llm_model(self, inputs):
-        waypoints_llm = self.model(**inputs).cpu().to(dtype=torch.float32).numpy()
+        with torch.inference_mode():
+            waypoints_llm = self.model(**inputs).detach().cpu().to(dtype=torch.float32).numpy()
         waypoints_llm_new = []
         for waypoint in waypoints_llm:
             waypoint_new = waypoint[:3] / (1e-6 + np.linalg.norm(waypoint[:3])) * waypoint[3]
@@ -52,8 +53,9 @@ class TravelModelWrapper(BaseModelWrapper):
 
     def run_traj_model(self, episodes, waypoints_llm_new, rot_to_targets):
         inputs = prepare_data_to_traj_model(episodes, waypoints_llm_new, self.image_processor, rot_to_targets)
-        waypoints_traj = self.traj_model(inputs, None)
-        refined_waypoints = waypoints_traj.cpu().to(dtype=torch.float32).numpy()
+        with torch.inference_mode():
+            waypoints_traj = self.traj_model(inputs, None)
+        refined_waypoints = waypoints_traj.detach().cpu().to(dtype=torch.float32).numpy()
         refined_waypoints = transform_to_world(refined_waypoints, episodes)
         return refined_waypoints
     

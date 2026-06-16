@@ -18,23 +18,23 @@ class ProfileTravelModelWrapper(TravelModelWrapper):
         episodes,
         rot_to_targets,
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
-        self._sync_cuda()
-        llm_start = time.perf_counter()
-        waypoints_llm_new = self.run_llm_model(inputs)
-        self._sync_cuda()
-        llm_latency_ms = (time.perf_counter() - llm_start) * 1000.0
+        with torch.inference_mode():
+            self._sync_cuda()
+            llm_start = time.perf_counter()
+            waypoints_llm_new = self.run_llm_model(inputs)
+            self._sync_cuda()
+            llm_latency_ms = (time.perf_counter() - llm_start) * 1000.0
 
-        self._sync_cuda()
-        traj_start = time.perf_counter()
-        refined_waypoints = self.run_traj_model(episodes, waypoints_llm_new, rot_to_targets)
-        self._sync_cuda()
-        traj_latency_ms = (time.perf_counter() - traj_start) * 1000.0
+            self._sync_cuda()
+            traj_start = time.perf_counter()
+            refined_waypoints = self.run_traj_model(episodes, waypoints_llm_new, rot_to_targets)
+            self._sync_cuda()
+            traj_latency_ms = (time.perf_counter() - traj_start) * 1000.0
 
         profile_info = {
             "llm_latency_ms": llm_latency_ms,
             "traj_latency_ms": traj_latency_ms,
-            "coarse_waypoints": np.asarray(waypoints_llm_new).tolist(),
-            "refined_waypoints": np.asarray(refined_waypoints).tolist(),
+            "llm_output": np.asarray(waypoints_llm_new).tolist(),
         }
         return refined_waypoints, profile_info
 
