@@ -20,6 +20,9 @@ class CommonArguments:
 
     maxInput: int = field(default=500, metadata={"help": "max input instruction"})
     maxWaypoints: int = field(default=500, metadata={"help": 'max action sequence'})
+    enable_comm_delay: bool = field(default=True, metadata={"help": "inject uplink delay in continuous eval"})
+    comm_trace_csv_path: Optional[str] = field(default=None, metadata={"help": "bandwidth trace csv path"})
+    chunk_waypoints: int = field(default=1, metadata={"help": "continuous eval decision interval in executed waypoints"})
 
     dagger_it: int = field(default=1)
     epochs: int = field(default=10)
@@ -114,4 +117,3 @@ args.vocab_size = 10038
 default_config = CN.clone()
 default_config.make_dir_time = args.make_dir_time
 default_config.freeze()
-

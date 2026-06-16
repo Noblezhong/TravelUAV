@@ -1,8 +1,9 @@
 #!/bin/bash
-# change the dataset_path to your own path
+# change the dataset_path / trace settings to your own path
 
 root_dir=. # TravelUAV directory
 model_dir=$root_dir/Model/LLaMA-UAV
+
 
 CUDA_VISIBLE_DEVICES=0 python -u $root_dir/src/vlnce_src/profile_eval.py \
     --run_type eval \
@@ -14,6 +15,8 @@ CUDA_VISIBLE_DEVICES=0 python -u $root_dir/src/vlnce_src/profile_eval.py \
     --always_help True \
     --use_gt True \
     --maxWaypoints 200 \
+    --enable_comm_delay True \
+    --comm_trace_csv_path $root_dir/bandwidth/ucc4g_bandwidth_trace.csv \
     --dataset_path /HDD2/TravelUAV_dataset/TravelUAV_data/ \
     --eval_save_path /HDD1/code/TravelUAV/eval_output_profile \
     --model_path $model_dir/work_dirs/llama-uav-7b \

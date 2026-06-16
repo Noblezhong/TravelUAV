@@ -12,6 +12,12 @@ sys.path.append(str(Path(str(os.getcwd())).resolve()))
 
 from assist import Assist
 from src.common.param import args, model_args, data_args
+from src.vlnce_src.comm_delay import (
+    BandwidthTrace,
+    calculate_latency_ms,
+    default_trace_path,
+    estimate_uplink_payload_bits_from_outputs,
+)
 from src.model_wrapper.profile_travel_llm import ProfileTravelModelWrapper
 from src.vlnce_src.closeloop_util import (
     BatchIterator,
@@ -45,9 +51,7 @@ def _write_jsonl_line(handle, payload):
     handle.flush()
 
 
-def _print_profile_line(step_idx, profile_info, refined_waypoints):
-    coarse = profile_info["coarse_waypoints"]
-    refined_shape = list(np.asarray(refined_waypoints).shape)
+def _print_profile_line(step_idx, profile_info):
     message = (
         f"[profile] step={step_idx} "
         f"llm={profile_info['llm_latency_ms']:.3f}ms "
@@ -55,13 +59,24 @@ def _print_profile_line(step_idx, profile_info, refined_waypoints):
         f"action={profile_info['airsim_action_latency_ms']:.3f}ms "
         f"obs={profile_info['obs_latency_ms']:.3f}ms "
         f"dino={profile_info['groundingdino_latency_ms']:.3f}ms "
-        f"coarse={coarse} "
-        f"refined_shape={refined_shape}"
+        f"uplink={profile_info['uplink_latency_ms']:.3f}ms "
+        f"bw={profile_info['uplink_bandwidth_mbps']:.3f}Mbps "
+        f"payload={profile_info['uplink_payload_mb']:.3f}MB "
+        f"llm_output={profile_info['llm_output']}"
     )
     logger.info(message)
 
 
-def eval(model_wrapper: ProfileTravelModelWrapper, assist: Assist, eval_env: AirVLNENV, eval_save_dir, profile_log_path, summary_path):
+def eval(
+    model_wrapper: ProfileTravelModelWrapper,
+    assist: Assist,
+    eval_env: AirVLNENV,
+    eval_save_dir,
+    profile_log_path,
+    summary_path,
+    bandwidth_trace: BandwidthTrace,
+    enable_comm_delay: bool,
+):
     model_wrapper.eval()
 
     summary_records = []
@@ -112,6 +127,12 @@ def eval(model_wrapper: ProfileTravelModelWrapper, assist: Assist, eval_env: Air
                             batch_state.predict_dones = model_wrapper.predict_done(batch_state.episodes, batch_state.object_infos)
                             dino_end = time.perf_counter()
 
+                            payload_bytes, payload_bits, payload_mb = estimate_uplink_payload_bits_from_outputs(outputs)
+                            bandwidth_bps = bandwidth_trace.next_bandwidth_bps()
+                            uplink_latency_ms = calculate_latency_ms(payload_bits, bandwidth_bps) if enable_comm_delay else 0.0
+                            if uplink_latency_ms > 0:
+                                time.sleep(uplink_latency_ms / 1000.0)
+
                             batch_state.update_from_env_output(outputs)
                             batch_state.update_metric()
                             assist_notices = batch_state.get_assist_notices()
@@ -129,15 +150,19 @@ def eval(model_wrapper: ProfileTravelModelWrapper, assist: Assist, eval_env: Air
                                 "obs_latency_ms": float((obs_end - obs_start) * 1000.0),
                                 "groundingdino_latency_ms": float((dino_end - dino_start) * 1000.0),
                                 "loop_latency_ms": float((loop_end - step_start) * 1000.0),
-                                "coarse_waypoints": profile_info["coarse_waypoints"],
-                                "refined_waypoints": profile_info["refined_waypoints"],
+                                "uplink_payload_bits": int(payload_bits),
+                                "uplink_payload_mb": float(payload_mb),
+                                "uplink_bandwidth_mbps": float(bandwidth_bps / 1_000_000.0),
+                                "uplink_latency_ms": float(uplink_latency_ms),
+                                "loop_latency_with_comm_ms": float((loop_end - step_start) * 1000.0 + uplink_latency_ms),
+                                "llm_output": profile_info["llm_output"],
                                 "predict_dones": [bool(x) for x in batch_state.predict_dones],
                                 "collisions": [bool(x) for x in batch_state.collisions],
                                 "dones": [bool(x) for x in batch_state.dones],
                             }
                             _write_jsonl_line(profile_fp, profile_info)
                             summary_records.append(profile_info)
-                            _print_profile_line(t, profile_info, refined_waypoints)
+                            _print_profile_line(t, profile_info)
                         episode_ok = True
                         break
                     except Exception as e:
@@ -161,6 +186,11 @@ def eval(model_wrapper: ProfileTravelModelWrapper, assist: Assist, eval_env: Air
         "obs_latency_ms": _metric_summary([item["obs_latency_ms"] for item in summary_records]),
         "groundingdino_latency_ms": _metric_summary([item["groundingdino_latency_ms"] for item in summary_records]),
         "loop_latency_ms": _metric_summary([item["loop_latency_ms"] for item in summary_records]),
+        "uplink_payload_bits": _metric_summary([item["uplink_payload_bits"] for item in summary_records]),
+        "uplink_payload_mb": _metric_summary([item["uplink_payload_mb"] for item in summary_records]),
+        "uplink_bandwidth_mbps": _metric_summary([item["uplink_bandwidth_mbps"] for item in summary_records]),
+        "uplink_latency_ms": _metric_summary([item["uplink_latency_ms"] for item in summary_records]),
+        "loop_latency_with_comm_ms": _metric_summary([item["loop_latency_with_comm_ms"] for item in summary_records]),
         "num_records": len(summary_records),
     }
     with open(summary_path, "w", encoding="utf-8") as f:
@@ -176,6 +206,13 @@ if __name__ == "__main__":
         os.makedirs(eval_save_path)
     profile_log_dir = os.path.join(eval_save_path, "profile_logs")
     os.makedirs(profile_log_dir, exist_ok=True)
+
+    enable_comm_delay = bool(args.enable_comm_delay)
+    trace_path = Path(args.comm_trace_csv_path) if args.comm_trace_csv_path else Path(default_trace_path())
+    if not trace_path.exists():
+        raise FileNotFoundError(f"bandwidth trace not found: {trace_path}")
+    bandwidth_trace = BandwidthTrace(trace_path, cycle=True)
+    logger.info(f"Loaded bandwidth trace: {trace_path} ({bandwidth_trace.sample_count} samples), enable_comm_delay={enable_comm_delay}")
 
     setup()
 
@@ -205,6 +242,8 @@ if __name__ == "__main__":
         eval_save_dir=eval_save_path,
         profile_log_path=profile_log_path,
         summary_path=summary_path,
+        bandwidth_trace=bandwidth_trace,
+        enable_comm_delay=enable_comm_delay,
     )
 
     eval_env.delete_VectorEnvUtil()

@@ -1,0 +1,19 @@
+{
+  "dataset": "UCC 4G LTE Dataset",
+  "dataset_url": "https://zenodo.org/records/1219679/files/LTE_Dataset.zip?download=1",
+  "dataset_path": "/HDD1/code/OpenFly-Platform/bandwidth/LTE_Dataset.zip",
+  "trace_member": "Dataset/car/B_2018.01.19_07.31.48.csv",
+  "field": "DL_bitrate",
+  "unit_assumption": "raw bitrate field is Kbit/s; bandwidth_bps = raw * 1000",
+  "filtering": "rows with non-numeric or <= 0 bitrate are removed; no scaling, smoothing, or interpolation",
+  "sample_count": 2004,
+  "bandwidth_mbps": {
+    "min": 1.543,
+    "p10": 10.473500000000001,
+    "median": 27.093,
+    "mean": 32.99403642714571,
+    "p90": 66.0648,
+    "p99": 97.04362000000002,
+    "max": 108.693
+  }
+}
