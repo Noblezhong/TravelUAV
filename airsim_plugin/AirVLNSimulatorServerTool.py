@@ -12,6 +12,7 @@ import subprocess
 import errno
 import signal
 import copy
+import re
 
 
 AIRSIM_SETTINGS_TEMPLATE = {
@@ -300,8 +301,9 @@ env_exec_path_dict = {
         'exec_path': './carla_town_envs/Town15/LinuxNoEditor',
     },
 }
-def create_drones(drone_num_per_env=1, show_scene=False, uav_mode=True) -> dict:
+def create_drones(drone_num_per_env=1, show_scene=False, uav_mode=True, clock_speed=1.0) -> dict:
     airsim_settings = copy.deepcopy(AIRSIM_SETTINGS_TEMPLATE)
+    airsim_settings["ClockSpeed"] = float(clock_speed)
     return airsim_settings
 
 
@@ -331,45 +333,54 @@ def pid_exists(pid) -> bool:
 
 
 def FromPortGetPid(port: int):
-    subprocess_execute = "netstat -nlp | grep {}".format(
-        port,
-    )
+    commands = [
+        "ss -ltnp | grep ':{} '".format(port),
+        "netstat -nlp | grep {}".format(port),
+    ]
 
-    try:
-        p = subprocess.Popen(
-            subprocess_execute,
-            stdin=None, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            shell=True,
-        )
-    except Exception as e:
-        print(
-            "{}\t{}\t{}".format(
-                str(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())),
-                'FromPortGetPid',
-                e,
+    for subprocess_execute in commands:
+        try:
+            p = subprocess.Popen(
+                subprocess_execute,
+                stdin=None, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                shell=True,
             )
-        )
-        return None
-    except:
-        return None
+        except Exception as e:
+            print(
+                "{}\t{}\t{}".format(
+                    str(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())),
+                    'FromPortGetPid',
+                    e,
+                )
+            )
+            continue
+        except:
+            continue
 
-    pid = None
-    for line in iter(p.stdout.readline, b''):
-        line = str(line, encoding="utf-8")
-        if 'tcp' in line:
-            pid = line.strip().split()[-1].split('/')[0]
+        pid = None
+        for line in iter(p.stdout.readline, b''):
+            line = str(line, encoding="utf-8")
+            if 'tcp' not in line and 'LISTEN' not in line:
+                continue
+            ss_match = re.search(r'pid=(\d+)', line)
+            if ss_match:
+                pid = int(ss_match.group(1))
+                break
             try:
-                pid = int(pid)
+                pid = int(line.strip().split()[-1].split('/')[0])
+                break
             except:
                 pid = None
-            break
 
-    try:
-        os.kill(p.pid, signal.SIGKILL)
-    except:
-        pass
+        try:
+            os.kill(p.pid, signal.SIGKILL)
+        except:
+            pass
 
-    return pid
+        if pid is not None:
+            return pid
+
+    return None
 
 
 def KillPid(pid) -> None:
@@ -512,7 +523,7 @@ class EventHandler(object):
         p_s = []
         for index, (scen_id, gpu_id) in enumerate(scen_id_gpu_list):
             # airsim settings 4
-            airsim_settings = create_drones()
+            airsim_settings = create_drones(clock_speed=args.clock_speed)
             airsim_settings['ApiServerPort'] = int(ports[index])
             self.port_to_scene[ports[index]] = (scen_id, gpu_id)
             airsim_settings_write_content = json.dumps(airsim_settings)
@@ -680,6 +691,12 @@ if __name__ == '__main__':
         default="/nfs/airport/airdrone/",
         help='root dir for env path'
     ) 
+    parser.add_argument(
+        "--clock_speed",
+        type=float,
+        default=1.0,
+        help='AirSim ClockSpeed written into settings.json'
+    )
     args = parser.parse_args()
 
 

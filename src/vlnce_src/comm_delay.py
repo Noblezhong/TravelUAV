@@ -54,7 +54,15 @@ def calculate_latency_ms(payload_bits, bandwidth_bps):
 
 def estimate_uplink_payload_bits_from_outputs(outputs):
     payload_bytes = 0
-    observations = outputs[0]
+    observations = []
+    for item in outputs:
+        if isinstance(item, (list, tuple)) and len(item) > 0:
+            env_obs = item[0]
+        else:
+            env_obs = item
+        if isinstance(env_obs, (list, tuple)) and len(env_obs) > 0:
+            observations.append(env_obs)
+
     for env_obs in observations:
         latest = env_obs[-1]
         for key in ("rgb", "depth", "rgb_record", "depth_record"):

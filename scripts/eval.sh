@@ -3,11 +3,18 @@
 
 root_dir=. # TravelUAV directory
 model_dir=$root_dir/Model/LLaMA-UAV
+enable_comm_delay=True
+com_suffix=""
+name_suffix=""
+if [ "$enable_comm_delay" = "True" ]; then
+    com_suffix="_com"
+    name_suffix="Com"
+fi
 
 
 CUDA_VISIBLE_DEVICES=0 python -u $root_dir/src/vlnce_src/eval.py \
     --run_type eval \
-    --name TravelLLM \
+    --name TravelLLM${name_suffix} \
     --gpu_id 0 \
     --simulator_tool_port 25000 \
     --DDP_MASTER_PORT 80005 \
@@ -15,10 +22,10 @@ CUDA_VISIBLE_DEVICES=0 python -u $root_dir/src/vlnce_src/eval.py \
     --always_help True \
     --use_gt True \
     --maxWaypoints 200 \
-    --enable_comm_delay True \
+    --enable_comm_delay $enable_comm_delay \
     --comm_trace_csv_path $root_dir/bandwidth/ucc4g_bandwidth_trace.csv \
     --dataset_path /HDD2/TravelUAV_dataset/TravelUAV_data/ \
-    --eval_save_path /HDD1/code/TravelUAV/eval_output \
+    --eval_save_path /HDD1/code/TravelUAV/eval_output${com_suffix} \
     --model_path $model_dir/work_dirs/llama-uav-7b \
     --model_base $model_dir/model_zoo/vicuna-7b-v1.5 \
     --vision_tower $model_dir/model_zoo/LAVIS/eva_vit_g.pth \

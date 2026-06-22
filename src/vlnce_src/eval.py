@@ -127,10 +127,6 @@ def eval(
                             outputs = eval_env.get_obs()
                             obs_end = time.perf_counter()
 
-                            dino_start = time.perf_counter()
-                            batch_state.predict_dones = model_wrapper.predict_done(batch_state.episodes, batch_state.object_infos)
-                            dino_end = time.perf_counter()
-
                             payload_bytes, payload_bits, payload_mb = estimate_uplink_payload_bits_from_outputs(outputs)
                             bandwidth_bps = bandwidth_trace.next_bandwidth_bps()
                             uplink_latency_ms = calculate_latency_ms(payload_bits, bandwidth_bps) if enable_comm_delay else 0.0
@@ -139,6 +135,9 @@ def eval(
                                 time.sleep(uplink_latency_ms / 1000.0)
 
                             batch_state.update_from_env_output(outputs)
+                            dino_start = time.perf_counter()
+                            batch_state.predict_dones = model_wrapper.predict_done(batch_state.episodes, batch_state.object_infos)
+                            dino_end = time.perf_counter()
                             batch_state.update_metric()
                             assist_notices = batch_state.get_assist_notices()
 

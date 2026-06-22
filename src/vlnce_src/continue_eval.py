@@ -102,6 +102,29 @@ def _set_console_log_message_only():
             handler.setFormatter(plain_formatter)
 
 
+def check_collision_without_tiny_diff(episodes, current_observations, collisions, dones):
+    for i, prev_episode in enumerate(episodes):
+        if collisions[i]:
+            if not dones[i]:
+                dones[i] = True
+            continue
+        if len(prev_episode) == 0:
+            continue
+
+        close_collision = False
+        current_episode = current_observations[i]
+        for cid in range(len(current_episode[-1]["depth"])):
+            zero_cnt = (current_episode[-1]["depth"][cid] <= 1).sum()
+            if zero_cnt > 0.1 * current_episode[-1]["depth"][cid].size:
+                close_collision = True
+                break
+
+        collisions[i] = close_collision
+        if collisions[i] and not dones[i]:
+            dones[i] = True
+    return collisions, dones
+
+
 def _print_episode_header(episode_idx, env_batch, chunk_waypoints):
     logger.info(
         f"\n[episode {episode_idx:04d}] seq={env_batch['seq_name']} "
@@ -138,6 +161,12 @@ def _fmt_optional_m(value, fmt=".2f"):
     return f"{format(value, fmt)}m"
 
 
+def _fmt_optional_mbps(value, fmt=".2f"):
+    if value is None:
+        return "None"
+    return f"{format(value, fmt)}Mbps"
+
+
 def _as_bool(value):
     if isinstance(value, bool):
         return value
@@ -169,15 +198,16 @@ def _waypoint_segment_stats(points):
 def _print_trajectory_bundle(episode_idx, decision_step, llm_output, refined_waypoints, current_pose=None):
     coarse_summary = _fmt_point(llm_output[0]) if len(llm_output) > 0 else "[]"
     refined_summary = _waypoint_segment_stats(refined_waypoints)
-    waypoints_summary = "[" + ", ".join(_fmt_point(point) for point in refined_waypoints) + "]" if len(refined_waypoints) > 0 else "[]"
+    final_waypoint = _fmt_point(refined_waypoints[-1]) if len(refined_waypoints) > 0 else "[]"
     line = (
         f"[ep {episode_idx:04d} decision_step={decision_step} plan] "
         f"coarse_local={coarse_summary} "
     )
     if current_pose is not None:
         line += f" | uav_world={_fmt_point(current_pose)}"
-    line += f" | waypoints_world={waypoints_summary}"
     line += (
+        f" | final_world={final_waypoint}"
+        f" | wp_n={refined_summary['count']}"
         f" | span={_fmt_optional_m(refined_summary['span_m'])}"
     )
     logger.info(line)
@@ -203,6 +233,7 @@ def _print_decision_profile_line(episode_idx, decision_step, profile_info):
         f"[ep {episode_idx:04d} decision_step={decision_step} timing] "
         f"obs={profile_info['obs_latency_ms']:.1f}ms "
         f"dino={profile_info['groundingdino_latency_ms']:.1f}ms "
+        f"bw={_fmt_optional_mbps(profile_info.get('uplink_bandwidth_mbps'))} "
         f"uplink={_fmt_optional_ms(profile_info.get('uplink_latency_ms'))} "
         f"llm={_fmt_optional_ms(profile_info.get('llm_latency_ms'))} "
         f"traj={_fmt_optional_ms(profile_info.get('traj_latency_ms'))} "
@@ -302,29 +333,7 @@ class ContinuousEpisodeState:
     def _check_collision_for_continuous(self, observations, dones, collisions):
         if not self.ignore_tiny_diff:
             return self.assist.check_collision_by_depth([self.episode], observations, collisions, dones)
-
-        for i, prev_episode in enumerate([self.episode]):
-            if collisions[i]:
-                if not dones[i]:
-                    dones[i] = True
-                continue
-            if len(prev_episode) == 0:
-                continue
-
-            close_collision = False
-            current_episode = observations[i]
-            for cid in range(len(current_episode[-1]["depth"])):
-                zero_cnt = (current_episode[-1]["depth"][cid] <= 1).sum()
-                if zero_cnt > 0.1 * current_episode[-1]["depth"][cid].size:
-                    close_collision = True
-                    break
-
-            # In continuous mode with one-step chunks, single-step displacement can be tiny
-            # without implying a real collision. Keep only the harder signal here.
-            collisions[i] = close_collision
-            if collisions[i] and not dones[i]:
-                dones[i] = True
-        return collisions, dones
+        return check_collision_without_tiny_diff([self.episode], observations, collisions, dones)
 
     def _append_unique_observations(self, observations: List[Dict[str, Any]]) -> None:
         for observation in observations:
@@ -621,7 +630,7 @@ def eval(
                             env_batchs[0],
                             eval_env,
                             assist,
-                            ignore_tiny_diff=(chunk_waypoints == 1),
+                            ignore_tiny_diff=True,
                         )
                         request_counter = 0
                         control_step = 0
@@ -666,19 +675,6 @@ def eval(
                         while not state.dones[0] and control_step < int(args.maxWaypoints):
                             applied_result = planner.poll_result()
                             dino_latency_ms = 0.0
-                            action_age_ms = None
-                            state_drift_m = None
-                            request_id = None
-                            request_submitted_step = None
-                            request_observation_timestamp = None
-                            request_ready_wall_time = None
-                            llm_latency_ms = None
-                            traj_latency_ms = None
-                            uplink_payload_bits = None
-                            uplink_payload_mb = None
-                            uplink_bandwidth_mbps = None
-                            uplink_latency_ms = None
-                            llm_output = None
                             trajectory_switch_applied = False
                             hover_wait_ms = 0.0
                             dino_predicted_this_step = False
@@ -687,24 +683,6 @@ def eval(
                                 active_traj = copy.deepcopy(applied_result.refined_waypoints)
                                 active_index = 0
                                 trajectory_switch_applied = True
-                                request_id = int(applied_result.request_id)
-                                request_submitted_step = int(applied_result.submitted_step)
-                                request_observation_timestamp = int(applied_result.observation_timestamp)
-                                request_ready_wall_time = float(applied_result.ready_wall_time)
-                                llm_latency_ms = float(applied_result.llm_latency_ms)
-                                traj_latency_ms = float(applied_result.traj_latency_ms)
-                                uplink_payload_bits = int(applied_result.uplink_payload_bits)
-                                uplink_payload_mb = float(applied_result.uplink_payload_mb)
-                                uplink_bandwidth_mbps = float(applied_result.uplink_bandwidth_mbps)
-                                uplink_latency_ms = float(applied_result.uplink_latency_ms)
-                                llm_output = copy.deepcopy(applied_result.llm_output)
-                                action_age_ms = float((time.perf_counter() - applied_result.submitted_perf_time) * 1000.0)
-                                state_drift_m = float(
-                                    math.dist(
-                                        applied_result.observation_pose,
-                                        state.current_sim_pose(),
-                                    )
-                                )
                                 current_pose = state.current_sim_pose()
                                 if pending_snapshot is not None and not planner.has_inflight():
                                     planner.submit(pending_snapshot)
@@ -774,12 +752,12 @@ def eval(
                                     "chunk_waypoints": int(chunk_waypoints),
                                     "executed_waypoints": int(chunk_size),
                                     "comm_delay_enabled": bool(enable_comm_delay),
-                                    "request_id": request_id,
-                                    "request_submitted_step": request_submitted_step,
-                                    "request_observation_timestamp": request_observation_timestamp,
-                                    "request_ready_wall_time": request_ready_wall_time,
-                                    "llm_latency_ms": llm_latency_ms,
-                                    "traj_latency_ms": traj_latency_ms,
+                                    "request_id": None,
+                                    "request_submitted_step": None,
+                                    "request_observation_timestamp": None,
+                                    "request_ready_wall_time": None,
+                                    "llm_latency_ms": None,
+                                    "traj_latency_ms": None,
                                     "airsim_action_latency_ms": action_latency_ms,
                                     "obs_latency_ms": 0.0,
                                     "groundingdino_latency_ms": 0.0,
@@ -787,15 +765,15 @@ def eval(
                                     "execution_post_dino_latency_ms": float(dino_latency_ms),
                                     "loop_latency_ms": action_latency_ms,
                                     "decision_latency_ms": None,
-                                    "uplink_payload_bits": uplink_payload_bits,
-                                    "uplink_payload_mb": uplink_payload_mb,
-                                    "uplink_bandwidth_mbps": uplink_bandwidth_mbps,
-                                    "uplink_latency_ms": uplink_latency_ms,
-                                    "action_age_ms": action_age_ms,
-                                    "state_drift_m": state_drift_m,
+                                    "uplink_payload_bits": None,
+                                    "uplink_payload_mb": None,
+                                    "uplink_bandwidth_mbps": None,
+                                    "uplink_latency_ms": None,
+                                    "action_age_ms": None,
+                                    "state_drift_m": None,
                                     "trajectory_switch_applied": bool(trajectory_switch_applied),
                                     "hover_wait_ms": float(hover_wait_ms),
-                                    "llm_output": llm_output,
+                                    "llm_output": None,
                                     "refined_waypoints": copy.deepcopy(active_traj),
                                     "current_pose": state.current_sim_pose(),
                                     "first_refined_gap_m": float(_point_delta(active_traj[0], state.current_sim_pose())) if len(active_traj) > 0 else None,
