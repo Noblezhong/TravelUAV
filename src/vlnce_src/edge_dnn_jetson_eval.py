@@ -102,14 +102,12 @@ def _coarse_goal_world(observation_pose, observation_rotation, coarse_local):
     return (pose + rot @ coarse).tolist()
 
 
-def _valid_refined_waypoints(refined_waypoints) -> bool:
+def _has_executable_waypoints(refined_waypoints) -> bool:
     arr = np.asarray(refined_waypoints, dtype=np.float64)
-    if arr.size == 0 or not np.all(np.isfinite(arr)):
+    if arr.size == 0 or arr.size % 3 != 0:
         return False
     arr = arr.reshape(-1, 3)
-    if len(arr) < 1:
-        return False
-    if len(arr) > 1 and float(np.linalg.norm(arr[-1] - arr[0])) < 0.05:
+    if len(arr) < 1 or not np.all(np.isfinite(arr)):
         return False
     return True
 
@@ -403,7 +401,6 @@ def eval(
     bandwidth_trace: BandwidthTrace,
     enable_comm_delay: bool,
     chunk_waypoints: int,
-    coarse_goal_min_distance: float,
 ):
     assert int(eval_env.batch_size) == 1, "edge DNN eval currently supports batchSize=1 only"
     model_wrapper.eval()
@@ -495,27 +492,6 @@ def eval(
                                 active_dnn_profile = None
                                 continue
                             coarse_goal_distance = _point_delta(active_coarse_result.coarse_goal_world, current_pose)
-                            if coarse_goal_distance < coarse_goal_min_distance:
-                                state.collisions[0] = True
-                                state.dones[0] = True
-                                record = {
-                                    "record_type": "coarse_goal_too_close",
-                                    "exec_step": int(exec_step),
-                                    "request_id": int(active_coarse_result.request_id),
-                                    "seq_names": [env_batchs[0]["seq_name"]],
-                                    "map_names": [env_batchs[0]["map_name"]],
-                                    "coarse_goal_distance_m": float(coarse_goal_distance),
-                                    "coarse_goal_min_distance_m": float(coarse_goal_min_distance),
-                                    "coarse_local": copy.deepcopy(active_coarse_result.coarse_local),
-                                    "coarse_goal_world": copy.deepcopy(active_coarse_result.coarse_goal_world),
-                                    "current_pose": copy.deepcopy(current_pose),
-                                    "success": bool(state.success),
-                                    "collision": bool(state.collisions[0]),
-                                    "done": bool(state.dones[0]),
-                                }
-                                _write_jsonl_line(profile_fp, record)
-                                summary_records.append(record)
-                                continue
 
                             dnn_ran_this_step = False
                             if active_index >= len(active_traj):
@@ -537,8 +513,7 @@ def eval(
                                     [active_coarse_result.coarse_goal_world],
                                 )
                                 refined_current = np.asarray(refined_waypoints[0]).tolist()
-                                if not _valid_refined_waypoints(refined_current):
-                                    state.collisions[0] = True
+                                if not _has_executable_waypoints(refined_current):
                                     state.dones[0] = True
                                     record = {
                                         "record_type": "dnn_invalid",
@@ -679,8 +654,7 @@ if __name__ == "__main__":
     print("Assist setting: always_help --", args.always_help, "    use_gt --", args.use_gt)
     print(
         f"Edge DNN setting: host={args.edge_vlm_host}:{args.edge_vlm_port}, "
-        f"chunk_waypoints={args.chunk_waypoints}, coarse_goal_min_distance={args.coarse_goal_min_distance}, "
-        f"enable_comm_delay={args.enable_comm_delay}"
+        f"chunk_waypoints={args.chunk_waypoints}, enable_comm_delay={args.enable_comm_delay}"
     )
 
     chunk_waypoints = max(1, int(args.chunk_waypoints))
@@ -698,6 +672,5 @@ if __name__ == "__main__":
         bandwidth_trace=bandwidth_trace,
         enable_comm_delay=enable_comm_delay,
         chunk_waypoints=chunk_waypoints,
-        coarse_goal_min_distance=float(args.coarse_goal_min_distance),
     )
     eval_env.delete_VectorEnvUtil()

@@ -39,7 +39,6 @@ CUDA_VISIBLE_DEVICES=0 python -u "$root_dir/src/vlnce_src/edge_dnn_jetson_eval.p
     --chunk_waypoints "$chunk_waypoints" \
     --enable_comm_delay "$enable_comm_delay" \
     --comm_trace_csv_path "$root_dir/bandwidth/ucc4g_bandwidth_trace.csv" \
-    --coarse_goal_min_distance 0.5 \
     --dataset_path "$dataset_path" \
     --eval_save_path "$eval_save_path" \
     --model_path "$model_dir/work_dirs/llama-uav-7b" \
