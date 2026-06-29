@@ -496,13 +496,25 @@ def eval(
                                 continue
                             coarse_goal_distance = _point_delta(active_coarse_result.coarse_goal_world, current_pose)
                             if coarse_goal_distance < coarse_goal_min_distance:
-                                if not edge_client.has_inflight():
-                                    request_counter += 1
-                                    edge_client.submit(state.build_snapshot(request_counter, exec_step))
-                                active_coarse_result = None
-                                active_traj = []
-                                active_index = 0
-                                active_dnn_profile = None
+                                state.collisions[0] = True
+                                state.dones[0] = True
+                                record = {
+                                    "record_type": "coarse_goal_too_close",
+                                    "exec_step": int(exec_step),
+                                    "request_id": int(active_coarse_result.request_id),
+                                    "seq_names": [env_batchs[0]["seq_name"]],
+                                    "map_names": [env_batchs[0]["map_name"]],
+                                    "coarse_goal_distance_m": float(coarse_goal_distance),
+                                    "coarse_goal_min_distance_m": float(coarse_goal_min_distance),
+                                    "coarse_local": copy.deepcopy(active_coarse_result.coarse_local),
+                                    "coarse_goal_world": copy.deepcopy(active_coarse_result.coarse_goal_world),
+                                    "current_pose": copy.deepcopy(current_pose),
+                                    "success": bool(state.success),
+                                    "collision": bool(state.collisions[0]),
+                                    "done": bool(state.dones[0]),
+                                }
+                                _write_jsonl_line(profile_fp, record)
+                                summary_records.append(record)
                                 continue
 
                             dnn_ran_this_step = False
@@ -526,10 +538,14 @@ def eval(
                                 )
                                 refined_current = np.asarray(refined_waypoints[0]).tolist()
                                 if not _valid_refined_waypoints(refined_current):
+                                    state.collisions[0] = True
+                                    state.dones[0] = True
                                     record = {
                                         "record_type": "dnn_invalid",
                                         "exec_step": int(exec_step),
                                         "request_id": int(active_coarse_result.request_id),
+                                        "seq_names": [env_batchs[0]["seq_name"]],
+                                        "map_names": [env_batchs[0]["map_name"]],
                                         "coarse_local": copy.deepcopy(active_coarse_result.coarse_local),
                                         "coarse_goal_world": copy.deepcopy(active_coarse_result.coarse_goal_world),
                                         "reprojected_coarse": dnn_profile["reprojected_coarse"][0],
@@ -540,7 +556,6 @@ def eval(
                                     }
                                     _write_jsonl_line(profile_fp, record)
                                     summary_records.append(record)
-                                    time.sleep(0.05)
                                     continue
                                 active_traj = refined_current
                                 active_index = 0
