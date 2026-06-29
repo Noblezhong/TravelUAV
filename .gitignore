@@ -9,6 +9,8 @@ dist
 *.log
 *.log.*
 *.jsonl
+*.pid
+run_logs/
 
 # Data
 data/
