@@ -26,7 +26,7 @@ class CommonArguments:
     edge_vlm_host: str = field(default="127.0.0.1", metadata={"help": "edge VLM server host"})
     edge_vlm_bind_host: str = field(default="0.0.0.0", metadata={"help": "edge VLM server bind host"})
     edge_vlm_port: int = field(default=26000, metadata={"help": "edge VLM server port"})
-    coarse_goal_min_distance: float = field(default=0.5, metadata={"help": "minimum distance to keep reusing cached coarse goal"})
+    coarse_goal_min_distance: float = field(default=0.5, metadata={"help": "deprecated; accepted for old edge DNN scripts but no longer used"})
 
     dagger_it: int = field(default=1)
     epochs: int = field(default=10)
