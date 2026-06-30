@@ -352,8 +352,11 @@ class AirVLNENV:
         return obs
 
     def _getStates(self):
-        responses = self.simulator_tool.getImageResponses()
-        responses_for_record = self.simulator_tool.getImageResponsesForRecord()
+        # CMA eval only needs front camera — 5x faster image capture
+        _cma_cameras = ['FrontCamera'] if os.environ.get('CMA_EVAL_ONLY') == '1' else \
+                       ['FrontCamera', 'LeftCamera', 'RightCamera', 'RearCamera', 'DownCamera']
+        responses = self.simulator_tool.getImageResponses(cameras=_cma_cameras)
+        responses_for_record = self.simulator_tool.getImageResponsesForRecord(cameras=['FrontCameraRecord'] if os.environ.get('CMA_EVAL_ONLY') == '1' else ['FrontCameraRecord', 'DownCameraRecord'])
         cnt = 0
         for item in responses:
             cnt += len(item)
@@ -417,7 +420,12 @@ class AirVLNENV:
                 waypoints_args[index_1].append(waypoints_list[cnt])
                 cnt += 1
         start_states = self._get_current_state()
-        results = self.simulator_tool.move_path_by_waypoints(waypoints_list=waypoints_args, start_states=start_states)
+        if os.environ.get('CMA_EVAL_ONLY') == '1':
+            # CMA: pass single [x,y,z,yaw], not [[x,y,z,yaw]]
+            cma_targets = [[wp[0] for wp in scene_wps] for scene_wps in waypoints_args]
+            results = self.simulator_tool.move_to_position(target_poses=cma_targets, start_states=start_states)
+        else:
+            results = self.simulator_tool.move_path_by_waypoints(waypoints_list=waypoints_args, start_states=start_states)
         if results is None:
             raise Exception('move on path error.')
         batch_results = []
@@ -428,7 +436,14 @@ class AirVLNENV:
                 batch_iscollision.append(results[index_1][index_2]['collision'])
         # When the server returns less than 5 points (collision or environment blockage), fill it to a length of 5
         for batch_idx, batch_result in enumerate(batch_results):
-            if 0 < len(batch_result) < 5:
+            if os.environ.get('CMA_EVAL_ONLY') == '1':
+                # CMA: single state per discrete step is normal; pad without forcing collision.
+                # The collision flag already comes from move_to_position result.
+                if len(batch_result) < 5:
+                    batch_result.extend([copy.deepcopy(batch_result[-1]) for _ in range(5 - len(batch_result))])
+                elif len(batch_result) == 0:
+                    batch_result.extend([copy.deepcopy(self.sim_states[batch_idx].trajectory[-1]) for _ in range(5)])
+            elif 0 < len(batch_result) < 5:
                 batch_result.extend([copy.deepcopy(batch_result[-1]) for i in range(5 - len(batch_result))])
                 batch_iscollision[batch_idx] = True
             elif len(batch_result) == 0:
@@ -436,7 +451,7 @@ class AirVLNENV:
                 batch_iscollision[batch_idx] = True
         for index, waypoints in enumerate(waypoints_list):
             for waypoint in waypoints: # check stop
-                if np.linalg.norm(np.array(waypoint) - np.array(self.batch[index]['object_position'])) < self.sim_states[index].SUCCESS_DISTANCE:
+                if np.linalg.norm(np.array(waypoint[0:3]) - np.array(self.batch[index]['object_position'])) < self.sim_states[index].SUCCESS_DISTANCE:
                     self.sim_states[index].oracle_success = True
                 elif self.sim_states[index].step >= int(args.maxWaypoints):
                     self.sim_states[index].is_end = True
@@ -477,7 +492,7 @@ class AirVLNENV:
 
         for index, waypoints in enumerate(waypoints_list):
             for waypoint in waypoints:
-                if np.linalg.norm(np.array(waypoint) - np.array(self.batch[index]['object_position'])) < self.sim_states[index].SUCCESS_DISTANCE:
+                if np.linalg.norm(np.array(waypoint[0:3]) - np.array(self.batch[index]['object_position'])) < self.sim_states[index].SUCCESS_DISTANCE:
                     self.sim_states[index].oracle_success = True
                 elif self.sim_states[index].step >= int(args.maxWaypoints):
                     self.sim_states[index].is_end = True

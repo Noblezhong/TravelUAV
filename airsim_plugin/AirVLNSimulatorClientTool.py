@@ -133,16 +133,15 @@ class AirVLNSimulatorClientTool:
                 if self.airsim_clients[index_1][index_2] is not None:
                     confirmed = False
                     count = 0
-                    while not confirmed and count < 30:
+                    while not confirmed and count < 60:
                         try:
                             self.airsim_clients[index_1][index_2].confirmConnection()
                             confirmed = True
                         except Exception as e:
                             time.sleep(1)
-                            print('failed', e)
                             count += 1
                             pass
-        
+
         return confirmed
 
     def _closeSocketConnection(self) -> None:
@@ -196,7 +195,7 @@ class AirVLNSimulatorClientTool:
                 raise Exception('打开场景失败')
             assert len(result[1]) == 2, '打开场景失败'
             print('waiting for airsim connection...')
-            time.sleep(3 * len(self.machines_info[index]['open_scenes']) + 35)
+            time.sleep(1)  # Server already waited for AirSim ready
             ip = result[1][0]
             if isinstance(ip, bytes):
                 ip = ip.decode('utf-8')
@@ -382,6 +381,119 @@ class AirVLNSimulatorClientTool:
         threads = []
         if not (np.array(thread_results) == True).all():
             logger.error('move path by waypoints failed.')
+            return None
+        if error_flag:
+            return None
+        return result_poses_list
+
+    def move_to_position(self, target_poses, start_states):
+        """
+        Move drone to target pose using moveToPositionAsync + rotateToYawAsync.
+        For CMA discrete actions — avoids moveOnPathAsync "stuck" false positive
+        on rotation-only actions (TURN_LEFT, TURN_RIGHT).
+        target_poses: list of lists of [x, y, z, yaw_deg] per scene.
+        Returns same format as move_path_by_waypoints: {states: [...], collision: bool}.
+        """
+        velocity = 2.0
+        timeout_sec = 15.0
+
+        def _move(airsim_client, target, start_state):
+            state_sensor = State(airsim_client)
+            imu_sensor = Imu(airsim_client, imu_name='Imu')
+
+            target_x, target_y, target_z = float(target[0]), float(target[1]), float(target[2])
+            target_yaw = float(target[3]) if len(target) >= 4 else None
+
+            airsim_client.enableApiControl(True)
+            airsim_client.armDisarm(True)
+            airsim_client.simPause(False)
+
+            teleport = os.environ.get('CMA_TELEPORT') == '1'
+            collision = False
+
+            if teleport:
+                # Instant teleport — skip flight simulation for fast eval
+                from scipy.spatial.transform import Rotation as R
+                yaw_rad = np.deg2rad(target_yaw) if target_yaw is not None else 0.0
+                r = R.from_euler('z', yaw_rad)
+                q = r.as_quat()  # [x, y, z, w]
+                pose = airsim.Pose(
+                    position_val=airsim.Vector3r(target_x, target_y, target_z),
+                    orientation_val=airsim.Quaternionr(q[0], q[1], q[2], q[3]),
+                )
+                airsim_client.simSetKinematics(pose, ignore_collision=True)  # Teleport must ignore collision
+                airsim_client.simContinueForFrames(1)
+                # Collision not meaningful in teleport mode — drone is placed at exact target pose
+            else:
+                airsim_client.simSetKinematics(start_state, ignore_collision=False)
+
+                current_state = state_sensor.retrieve()
+                current_pos = np.array(current_state['position'])
+                target_pos = np.array([target_x, target_y, target_z])
+                distance = float(np.linalg.norm(target_pos - current_pos))
+
+                collision = current_state.get('collision', {}).get('has_collided', False)
+
+                if not collision:
+                    if distance > 0.2:
+                        # Position change: fly to target with desired yaw
+                        yaw_mode = airsim.YawMode(is_rate=False, yaw_or_rate=target_yaw) \
+                            if target_yaw is not None else airsim.YawMode()
+                        try:
+                            airsim_client.moveToPositionAsync(
+                                target_x, target_y, target_z, velocity,
+                                timeout_sec=timeout_sec,
+                                drivetrain=airsim.DrivetrainType.ForwardOnly,
+                                yaw_mode=yaw_mode,
+                            ).join()
+                        except Exception:
+                            collision = True
+                    elif target_yaw is not None:
+                        # Rotation only (TURN action)
+                        try:
+                            airsim_client.rotateToYawAsync(target_yaw, timeout_sec=timeout_sec).join()
+                        except Exception:
+                            collision = True
+
+            state_info = state_sensor.retrieve()
+            imu_info = imu_sensor.retrieve()
+            if not teleport and not collision:
+                collision = state_info.get('collision', {}).get('has_collided', False)
+
+            airsim_client.simPause(True)
+            return {'states': [{'sensors': {'state': state_info, 'imu': imu_info}}], 'collision': collision}
+
+        threads = []
+        thread_results = []
+        for index_1 in range(len(self.airsim_clients)):
+            threads.append([])
+            for index_2 in range(len(self.airsim_clients[index_1])):
+                threads[index_1].append(
+                    MyThread(_move, (self.airsim_clients[index_1][index_2],
+                                     target_poses[index_1][index_2],
+                                     start_states[index_1][index_2]))
+                )
+        for index_1, _ in enumerate(threads):
+            for index_2, _ in enumerate(threads[index_1]):
+                threads[index_1][index_2].setDaemon(True)
+                threads[index_1][index_2].start()
+        for index_1, _ in enumerate(threads):
+            for index_2, _ in enumerate(threads[index_1]):
+                threads[index_1][index_2].join()
+
+        result_poses_list = []
+        error_flag = False
+        for index_1, _ in enumerate(threads):
+            result_poses_list.append([])
+            for index_2, _ in enumerate(threads[index_1]):
+                result = threads[index_1][index_2].get_result()
+                result_poses_list[index_1].append(result)
+                if result is None:
+                    error_flag = True
+                thread_results.append(threads[index_1][index_2].flag_ok)
+        threads = []
+        if not (np.array(thread_results) == True).all():
+            logger.error('move to position failed.')
             return None
         if error_flag:
             return None

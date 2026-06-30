@@ -562,9 +562,40 @@ class EventHandler(object):
                     return False, None
                 except:
                     return False, None
-        time.sleep(10)
+        # Suppress tornado connection warnings during wait
+        import logging
+        logging.getLogger('tornado').setLevel(logging.ERROR)
+        # Wait for AirSim to be ready (accepting RPC, not just port-open)
+        import socket
+        max_wait = 180
+        print(f"Waiting up to {max_wait}s for AirSim to be ready...")
+        for port in ports:
+            ready = False
+            for attempt in range(max_wait // 2):
+                time.sleep(2)
+                # Check if port is accepting connections
+                s = socket.socket()
+                s.settimeout(1)
+                if s.connect_ex(('127.0.0.1', port)) == 0:
+                    s.close()
+                    # Port is open, wait extra 10s for AirSim RPC init
+                    time.sleep(10)
+                    try:
+                        import airsim
+                        client = airsim.MultirotorClient(ip=ip, port=port, timeout_value=30)
+                        client.confirmConnection()
+                        ready = True
+                        print(f"AirSim ready on port {port} (after {(attempt+1)*2+10}s)")
+                        break
+                    except Exception:
+                        print(f"  Port open but AirSim not responding, retrying...")
+                else:
+                    s.close()
+            if not ready:
+                print(f"ERROR: AirSim failed after {max_wait}s on port {port}")
+                return False, None
         self.scene_used_ports += copy.deepcopy(ports)
-        
+
         print("finished", ip)
 
         return True, (ip, ports)

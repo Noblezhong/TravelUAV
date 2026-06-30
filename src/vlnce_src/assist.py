@@ -6,6 +6,7 @@ import os
 from PIL import Image
 from src.vlnce_src.env_uav import RGB_FOLDER, DEPTH_FOLDER
 from collections import deque
+from utils.logger import logger
 class Assist:
     def __init__(self, always_help = False, use_gt = False, device=0):
         self.always_help = always_help
@@ -41,6 +42,15 @@ class Assist:
         return shortest_pos
 
     def check_collision_by_depth(self, episodes, current_observations, collisions, dones):
+        # CMA uses AirSim built-in collision sensor via moveToPositionAsync.
+        # Skip depth-based comparison (would IndexError on single-camera setup)
+        # but still honour AirSim collision flag.
+        if os.environ.get('CMA_EVAL_ONLY') == '1':
+            for i in range(len(episodes)):
+                if collisions[i] and not dones[i]:
+                    dones[i] = True
+            return collisions, dones
+
         for i, prev_episode in enumerate(episodes):
             collision_type = None
             if collisions[i]:
@@ -169,8 +179,7 @@ class Assist:
                             state = 'left'
                 assist_notices[i] = state
         except Exception as e:
-            import pdb; pdb.set_trace()
-            print(f'Debug: {e}')
+            logger.error(f'get_assist_notice_with_gt failed: {e}', exc_info=True)
         
         return assist_notices
     
@@ -213,6 +222,11 @@ class Assist:
         return assist_notices
 
     def get_assist_notice(self, episodes, trajs, object_infos, target_positions):
+        # CMA cannot use text guidance (discrete action model, no text input).
+        # Skip entire assist chain to also avoid depth/dino IndexError (single camera).
+        if os.environ.get('CMA_EVAL_ONLY') == '1':
+            return [None for _ in range(len(episodes))]
+
         assist_notices = [None for _ in range(len(episodes))]
         is_helps = [False for _ in range(len(episodes))]
         if not self.always_help:
@@ -228,7 +242,7 @@ class Assist:
             assist_notices = self.get_assist_notice_with_rule(episodes, object_infos, target_positions, is_helps)
         return assist_notices
     
-    def dino_target_detection(self, episodes, object_infos) -> list[list]:
+    def dino_target_detection(self, episodes, object_infos):
         target_detections = []
         if self.dino_monitor is None:
             from src.vlnce_src.dino_monitor_online import DinoMonitor

@@ -1,5 +1,6 @@
 
 import json
+import os
 import random
 import shutil
 
@@ -88,10 +89,14 @@ def save_images(episodes, trajectory_dir):
     for idx, episode in enumerate(episodes):
         if 'rgb' in episode:
             for cid, camera_name in enumerate(RGB_FOLDER):
+                if cid >= len(episode['rgb']):
+                    break
                 image = episode['rgb'][cid]
                 cv2.imwrite(os.path.join(trajectory_dir, camera_name, str(idx).zfill(6) + '.png'), image)
         if 'depth' in episode:
             for cid, camera_name in enumerate(DEPTH_FOLDER):
+                if cid >= len(episode['depth']):
+                    break
                 image = episode['depth'][cid]
                 cv2.imwrite(os.path.join(trajectory_dir, camera_name, str(idx).zfill(6) + '.png'), image)
 
@@ -268,8 +273,12 @@ class EvalBatchState:
                 self.episodes[i].append(observations[i][j])
             self.distance_to_ends[i].append(self._calculate_distance(observations[i][-1], self.target_positions[i]))
             if target_distance_increasing_for_10frames(self.distance_to_ends[i]):
-                self.collisions[i] = True
-                self.dones[i] = True
+                # CMA: early stop but don't count as collision (no physical collision in teleport)
+                if os.environ.get('CMA_EVAL_ONLY') == '1':
+                    self.dones[i] = True
+                else:
+                    self.collisions[i] = True
+                    self.dones[i] = True
 
     def get_assist_notices(self):
         return self.assist.get_assist_notice(self.episodes, self.trajs, self.object_infos, self.target_positions)
@@ -283,9 +292,9 @@ class EvalBatchState:
                     self.success[i] = True
                 elif self.distance_to_ends[i][-1] > 20:
                     self.early_end[i] = True
-                if self.oracle_success[i] and self.early_end[i]:
-                    self.dones[i] = True
-                elif self.success[i]:
+                # CMA: STOP action → always end episode (matches AerialVLN behavior)
+                # Success = distance <= 20m, otherwise final position is recorded as-is
+                if self.predict_dones[i]:
                     self.dones[i] = True
                     
     def check_batch_termination(self, t):

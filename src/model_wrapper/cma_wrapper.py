@@ -5,13 +5,16 @@ Implements the same interface as ProfileTravelModelWrapper.
 import time
 import re
 import string
+import os
 import numpy as np
 from typing import Any, Dict, Tuple
 from collections import defaultdict
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T
+import torchvision.models as models
 from scipy.spatial.transform import Rotation as R
 
 from src.model_wrapper.base_model import BaseModelWrapper
@@ -64,18 +67,65 @@ def tokenize(text, word2idx, max_length=300):
 # ============================================================
 # Image pre-processing
 # ============================================================
-rgb_transform = T.Compose([
-    T.ToPILImage(),
-    T.Resize(224),
-    T.CenterCrop(224),
-    T.ToTensor(),
-])
+rgb_resize = T.Compose([T.ToPILImage(), T.Resize(224), T.CenterCrop(224)])
+depth_resize = T.Compose([T.ToPILImage(), T.Resize((256, 256))])
 
-depth_transform = T.Compose([
-    T.ToPILImage(),
-    T.Resize((256, 256)),
-    T.ToTensor(),
-])
+# Feature extractor matching convert_traveluav.py's RGBFeatureExtractor:
+# ResNet50 with ImageNet Normalize + AdaptiveAvgPool2d(4,4) + forward hook
+# Training used pre-extracted rgb_features [2048, 4, 4], not raw images.
+_rgb_feat_extractor = None
+
+
+def _get_rgb_feature_extractor(device):
+    """Lazy init ResNet50 feature extractor matching training pipeline."""
+    global _rgb_feat_extractor
+    if _rgb_feat_extractor is None:
+        cnn = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
+        cnn.avgpool = nn.AdaptiveAvgPool2d((4, 4))
+        cnn.fc = nn.Sequential()
+        cnn.eval()
+        cnn.to(device)
+        for param in cnn.parameters():
+            param.requires_grad = False
+        _rgb_feat_extractor = cnn
+    return _rgb_feat_extractor
+
+
+_rgb_feat_hook_output = None
+
+
+def _rgb_feat_hook(module, inp, out):
+    global _rgb_feat_hook_output
+    _rgb_feat_hook_output = out
+
+
+# ImageNet normalization matching convert_traveluav.py
+_rgb_normalize = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+_rgb_to_tensor = T.ToTensor()
+
+
+@torch.no_grad()
+def extract_rgb_features(rgb_np, device):
+    """Extract ResNet50 [2048, 4, 4] features with ImageNet Normalize.
+    Matches convert_traveluav.py's RGBFeatureExtractor pipeline exactly."""
+    global _rgb_feat_hook_output
+    cnn = _get_rgb_feature_extractor(device)
+    # Convert uint8 [H,W,3] → tensor [3,H,W] float [0,1] → Normalize
+    img_tensor = _rgb_normalize(_rgb_to_tensor(rgb_np)).unsqueeze(0).to(device)
+    _rgb_feat_hook_output = None
+    hook_handle = cnn.avgpool.register_forward_hook(_rgb_feat_hook)
+    cnn(img_tensor)
+    hook_handle.remove()
+    return _rgb_feat_hook_output  # [1, 2048, 4, 4]
+
+
+# ============================================================
+# Action naming
+# ============================================================
+ACTION_NAMES = {
+    0: 'STOP', 1: 'FORWARD', 2: 'TURN_LEFT', 3: 'TURN_RIGHT',
+    4: 'GO_UP', 5: 'GO_DOWN', 6: 'MOVE_LEFT', 7: 'MOVE_RIGHT',
+}
 
 
 # ============================================================
@@ -152,38 +202,34 @@ class CMAModelWrapper(BaseModelWrapper):
         self.not_done_masks = None
         self.instruction_tokens = None
         self.active_episode_id = None
+        self.last_action = None
 
     def eval(self):
         self.model.eval()
 
     def _get_current_obs(self, ep_history):
         """Extract latest observation from episode history."""
-        # ep_history is a list of observations (each observation is a list of dicts)
-        # Latest entry with 'rgb' key contains the current sensor data
         latest = ep_history[-1]
-        # Find the dict with 'rgb' in the list
-        obs_dict = None
-        for item in reversed(latest):
-            if isinstance(item, dict) and 'rgb' in item:
-                obs_dict = item
-                break
-        if obs_dict is None:
-            for item in latest:
+        # latest is a single dict with 'rgb', 'depth', 'sensors' keys
+        if isinstance(latest, dict) and 'rgb' in latest:
+            return latest
+        # Fallback: latest might be a list of dicts
+        if isinstance(latest, list):
+            for item in reversed(latest):
                 if isinstance(item, dict) and 'rgb' in item:
-                    obs_dict = item
-                    break
-        return obs_dict
+                    return item
+        return None
 
     def _preprocess_frame(self, obs_dict):
-        """Preprocess a single observation frame for CMA."""
-        # Front camera is first in the multi-view list
-        rgb_img = obs_dict['rgb'][0]   # numpy array [H, W, 3]
-        depth_img = obs_dict['depth'][0]  # numpy array [H, W]
+        """Preprocess depth frame for AerialVLN CMA encoder.
+        RGB is handled separately via extract_rgb_features (matching training pipeline)."""
+        depth_img = obs_dict['depth'][0]  # numpy array [H, W] uint8
 
-        rgb_tensor = rgb_transform(rgb_img)      # [3, 224, 224]
-        depth_tensor = depth_transform(depth_img) # [1, 256, 256]
+        depth_resized = np.array(depth_resize(depth_img))    # [256, 256] uint8
+        depth_resized = depth_resized.astype(np.float32) / 255.0  # normalize to [0,1]
+        depth_resized = depth_resized[:, :, np.newaxis]     # [256, 256, 1] float32
 
-        return rgb_tensor, depth_tensor
+        return depth_resized
 
     @torch.no_grad()
     def prepare_inputs(self, episodes, target_positions, assist_notices=None):
@@ -200,6 +246,8 @@ class CMAModelWrapper(BaseModelWrapper):
             self.prev_actions = None
             self.not_done_masks = None
             self.instruction_tokens = None
+            self.last_action = None
+            self._step_counter = 0
             self.active_episode_id = current_ep_id
 
         inputs = {
@@ -219,10 +267,14 @@ class CMAModelWrapper(BaseModelWrapper):
         for i in range(batch_size):
             obs_dict = self._get_current_obs(episodes[i])
             if obs_dict is None:
-                waypoints_list.append([np.zeros(7)])
+                import logging
+                logging.getLogger(__name__).warning(f"obs_dict is None for episode {i}")
+                waypoints_list.append([np.zeros(3)])
                 continue
 
-            rgb_tensor, depth_tensor = self._preprocess_frame(obs_dict)
+            rgb_np = np.array(rgb_resize(obs_dict['rgb'][0]))   # [224, 224, 3] uint8
+            depth_np = self._preprocess_frame(obs_dict)
+            rgb_features = extract_rgb_features(rgb_np, self.device)  # [1, 2048, 4, 4]
 
             # Get current pose
             sensors = obs_dict.get('sensors', {})
@@ -240,16 +292,11 @@ class CMAModelWrapper(BaseModelWrapper):
                     self.instruction_tokens
                 ).unsqueeze(0).to(self.device)
 
-            # Build observation dict for CMA
-            rgb_batch = rgb_tensor.unsqueeze(0).to(self.device)       # [1, 3, 224, 224]
-            depth_batch = depth_tensor.unsqueeze(0).to(self.device)    # [1, 1, 256, 256]
-            instr_batch = self.instruction_tokens                     # [1, 300]
-
+            # Build observation dict for AerialVLN CMA (matching training pipeline)
             cma_obs = {
-                'rgb_tensor': rgb_batch,  # Special key for our encoder
-                'rgb': depth_tensor.unsqueeze(0).unsqueeze(-1).to(self.device),  # Dummy - not used
-                'depth': depth_tensor.permute(1, 2, 0).unsqueeze(0).to(self.device),  # [1, 256, 256, 1]
-                'instruction': instr_batch,
+                'rgb_features': rgb_features,                                     # [1, 2048, 4, 4]
+                'depth': torch.from_numpy(depth_np).unsqueeze(0).to(self.device), # [1, 256, 256, 1] float32
+                'instruction': self.instruction_tokens,                            # [1, 300] int64
             }
 
             # Initialize RNN state
@@ -269,13 +316,25 @@ class CMAModelWrapper(BaseModelWrapper):
 
             # Convert action → waypoint offset → global waypoint
             action = actions[0].item()
+            self.last_action = action  # track for predict_done
             dx, dy, dz, dyaw = action_to_waypoint_offset(action)
 
             new_pos, new_ori = apply_action_to_pose(cur_pos, cur_ori, dx, dy, dz, dyaw)
 
-            # Build waypoint list (in TravelUAV format: [x, y, z, qx, qy, qz, qw])
-            waypoint = [new_pos[0], new_pos[1], new_pos[2],
-                        new_ori[0], new_ori[1], new_ori[2], new_ori[3]]
+            # Extract yaw from new orientation quaternion [x, y, z, w]
+            r = R.from_quat([new_ori[0], new_ori[1], new_ori[2], new_ori[3]])
+            yaw_deg = float(np.rad2deg(r.as_euler('xyz')[2]))
+
+            # Build waypoint [x, y, z, yaw_deg] — yaw used by move_to_position for turns
+            waypoint = [float(new_pos[0]), float(new_pos[1]), float(new_pos[2]), yaw_deg]
+            if not hasattr(self, '_step_counter'):
+                self._step_counter = 0
+            self._step_counter += 1
+
+            # Per-step log (suppressed during DAgger collect)
+            if not os.environ.get('CMA_QUIET'):
+                aname = ACTION_NAMES.get(action, str(action))
+                print(f"  [CMA step {self._step_counter}] pos=({cur_pos[0]:.1f},{cur_pos[1]:.1f},{cur_pos[2]:.1f}) → {aname} → wp=({new_pos[0]:.1f},{new_pos[1]:.1f},{new_pos[2]:.1f}) yaw={yaw_deg:.1f}°")
             waypoints_list.append([waypoint])
 
             # Update RNN state for next step
@@ -293,5 +352,7 @@ class CMAModelWrapper(BaseModelWrapper):
         return waypoints_list, profile_info
 
     def predict_done(self, episodes, object_infos):
-        """CMA doesn't have explicit done prediction. Return False."""
+        """CMA uses STOP action (0) as termination signal."""
+        if hasattr(self, 'last_action') and self.last_action == 0:
+            return [True] * len(episodes)
         return [False] * len(episodes)
