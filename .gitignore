@@ -28,6 +28,7 @@ eval_dnn_com_w*/
 eval_edge_dnn_w*/
 eval_edge_dnn_com_w*/
 eval_hybrid_*/
+eval_drl_scheduler_*/
 
 # Local research notes / drafts
 HYBRID_SCHEDULER_MDP_MODELING.md
