@@ -75,7 +75,27 @@ class EdgeVLMWrapper:
             waypoints_llm_new.append(waypoint_new)
         return np.array(waypoints_llm_new), latency_ms
 
+    @staticmethod
+    def coarse_to_world_goals(episodes, coarse_targets, rot_to_targets):
+        coarse_goal_world = []
+        for i, episode in enumerate(episodes):
+            latest = episode[-1]
+            pos_now = np.asarray(latest["sensors"]["state"]["position"][0:3], dtype=np.float64)
+            rot_0 = np.asarray(episode[0]["sensors"]["imu"]["rotation"], dtype=np.float64).reshape(3, 3)
+            coarse = np.asarray(coarse_targets[i], dtype=np.float64).reshape(3)
+            rot_to_target = None
+            if rot_to_targets is not None and rot_to_targets[i] is not None:
+                rot_to_target = np.asarray(rot_to_targets[i], dtype=np.float64).reshape(3, 3)
+
+            if rot_to_target is not None:
+                world_delta = rot_0 @ rot_to_target @ coarse
+            else:
+                world_delta = rot_0 @ coarse
+            coarse_goal_world.append((pos_now + world_delta).tolist())
+        return coarse_goal_world
+
     def run_coarse(self, episodes, target_positions, assist_notices=None):
-        inputs, _ = self.prepare_inputs(episodes, target_positions, assist_notices)
+        inputs, rot_to_targets = self.prepare_inputs(episodes, target_positions, assist_notices)
         coarse_local, llm_latency_ms = self.run_llm_model(inputs)
-        return coarse_local, llm_latency_ms
+        coarse_goal_world = self.coarse_to_world_goals(episodes, coarse_local, rot_to_targets)
+        return coarse_local, coarse_goal_world, llm_latency_ms

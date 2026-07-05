@@ -28,18 +28,21 @@ class EdgeVLMRequestHandler(socketserver.BaseRequestHandler):
             target_position = np.asarray(target_positions[0], dtype=np.float64)
             distance_to_target_m = float(np.linalg.norm(latest_position - target_position))
             coarse_local = None
+            coarse_goal_world = None
             llm_latency_ms = 0.0
             if not (predict_done and distance_to_target_m <= 20):
-                coarse_local, llm_latency_ms = self.server.model_wrapper.run_coarse(
+                coarse_local, coarse_goal_world, llm_latency_ms = self.server.model_wrapper.run_coarse(
                     episodes,
                     target_positions,
                     assist_notices,
                 )
                 coarse_local = coarse_local[0].tolist()
+                coarse_goal_world = coarse_goal_world[0]
             response = {
                 "ok": True,
                 "request_id": int(payload["request_id"]),
                 "coarse_local": coarse_local,
+                "coarse_goal_world": coarse_goal_world,
                 "llm_latency_ms": float(llm_latency_ms),
                 "predict_done": bool(predict_done),
                 "dino_distance_to_target_m": distance_to_target_m,

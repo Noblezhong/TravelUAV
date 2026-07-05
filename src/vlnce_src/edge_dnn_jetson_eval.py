@@ -68,6 +68,8 @@ class EdgeCoarseResult:
     ready_wall_time: float
     coarse_local: Optional[List[float]]
     coarse_goal_world: Optional[List[float]]
+    coarse_goal_world_source: str
+    legacy_body_goal_world: Optional[List[float]]
     edge_llm_latency_ms: float
     uplink_payload_bits: int
     uplink_payload_mb: float
@@ -329,9 +331,18 @@ class LatestOnlyEdgeVLMClient:
         if not response.get("ok", False):
             raise RuntimeError(response.get("error", "edge VLM request failed"))
         coarse_local = response.get("coarse_local")
-        coarse_goal = None
+        coarse_goal = response.get("coarse_goal_world")
+        coarse_goal_source = "edge_travel_frame" if coarse_goal is not None else "none"
+        legacy_body_goal = None
         if coarse_local is not None:
-            coarse_goal = _coarse_goal_world(snapshot.observation_pose, snapshot.observation_rotation, coarse_local)
+            legacy_body_goal = _coarse_goal_world(snapshot.observation_pose, snapshot.observation_rotation, coarse_local)
+            if coarse_goal is None:
+                raise RuntimeError(
+                    "edge VLM response has coarse_local but no coarse_goal_world; "
+                    "restart edge_vlm_server with the updated TravelUAV-frame code"
+                )
+            else:
+                coarse_goal = np.asarray(coarse_goal, dtype=np.float64).reshape(3).tolist()
         return EdgeCoarseResult(
             request_id=snapshot.request_id,
             submitted_step=snapshot.submitted_step,
@@ -343,6 +354,8 @@ class LatestOnlyEdgeVLMClient:
             ready_wall_time=time.time(),
             coarse_local=copy.deepcopy(coarse_local),
             coarse_goal_world=coarse_goal,
+            coarse_goal_world_source=coarse_goal_source,
+            legacy_body_goal_world=legacy_body_goal,
             edge_llm_latency_ms=float(response["llm_latency_ms"]),
             uplink_payload_bits=int(payload_bits),
             uplink_payload_mb=float(payload_mb),
@@ -372,12 +385,13 @@ def _print_episode_header(episode_idx, env_batch, chunk_waypoints):
 def _print_edge_result(episode_idx, result: EdgeCoarseResult, action_delay_ms, state_drift_m):
     coarse_text = "None" if result.coarse_local is None else _fmt_point(result.coarse_local)
     goal_text = "None" if result.coarse_goal_world is None else _fmt_point(result.coarse_goal_world)
+    legacy_goal_text = "None" if result.legacy_body_goal_world is None else _fmt_point(result.legacy_body_goal_world)
     logger.info(
         f"[ep {episode_idx:04d} edge request={result.request_id}] "
         f"uplink={result.uplink_latency_ms:.1f}ms bw={result.uplink_bandwidth_mbps:.2f}Mbps "
         f"llm={result.edge_llm_latency_ms:.1f}ms "
         f"delay={action_delay_ms:.1f}ms drift={state_drift_m:.2f}m "
-        f"coarse={coarse_text} goal={goal_text}"
+        f"coarse={coarse_text} goal={goal_text} legacy_goal={legacy_goal_text}"
     )
 
 
@@ -523,6 +537,10 @@ def eval(
                                         "map_names": [env_batchs[0]["map_name"]],
                                         "coarse_local": copy.deepcopy(active_coarse_result.coarse_local),
                                         "coarse_goal_world": copy.deepcopy(active_coarse_result.coarse_goal_world),
+                                        "coarse_goal_world_source": active_coarse_result.coarse_goal_world_source,
+                                        "legacy_body_goal_world": copy.deepcopy(
+                                            active_coarse_result.legacy_body_goal_world
+                                        ),
                                         "reprojected_coarse": dnn_profile["reprojected_coarse"][0],
                                         "refined_waypoints": copy.deepcopy(refined_current),
                                         "dones": [bool(x) for x in state.dones],
@@ -584,6 +602,8 @@ def eval(
                                 "coarse_goal_distance_m": float(coarse_goal_distance),
                                 "coarse_local": copy.deepcopy(active_coarse_result.coarse_local),
                                 "coarse_goal_world": copy.deepcopy(active_coarse_result.coarse_goal_world),
+                                "coarse_goal_world_source": active_coarse_result.coarse_goal_world_source,
+                                "legacy_body_goal_world": copy.deepcopy(active_coarse_result.legacy_body_goal_world),
                                 "reprojected_coarse": copy.deepcopy(active_dnn_profile["reprojected_coarse"][0]),
                                 "refined_waypoints": copy.deepcopy(active_traj),
                                 "executed_waypoint": copy.deepcopy(current_chunk[0]),
