@@ -3,6 +3,7 @@
 root_dir=.
 model_dir=$root_dir/Model/LLaMA-UAV
 enable_comm_delay=True
+run_ts=$(date +%m%d-%H%M)
 
 CUDA_VISIBLE_DEVICES=0 python -u $root_dir/src/vlnce_src/drl_scheduler_train.py \
     --run_type eval \
@@ -18,10 +19,13 @@ CUDA_VISIBLE_DEVICES=0 python -u $root_dir/src/vlnce_src/drl_scheduler_train.py 
     --comm_trace_csv_path $root_dir/bandwidth/ucc4g_bandwidth_trace.csv \
     --scheduler_total_timesteps 10000 \
     --scheduler_n_steps 64 \
+    --scheduler_time_weight 0.5 \
+    --scheduler_drift_weight 2.0 \
+    --scheduler_request_weight 1.0 \
     --scheduler_batch_size 32 \
     --scheduler_learning_rate 0.0003 \
     --dataset_path /HDD2/TravelUAV_dataset/TravelUAV_data/ \
-    --eval_save_path /HDD1/code/TravelUAV/eval_drl_scheduler_train \
+    --eval_save_path /code/TravelUAV/drl_train_$run_ts \
     --model_path $model_dir/work_dirs/llama-uav-7b \
     --model_base $model_dir/model_zoo/vicuna-7b-v1.5 \
     --vision_tower $model_dir/model_zoo/LAVIS/eva_vit_g.pth \

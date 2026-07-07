@@ -59,6 +59,7 @@ def main():
         enable_comm_delay=enable_comm_delay,
         max_waypoints=args.maxWaypoints,
     )
+    from stable_baselines3.common.callbacks import CheckpointCallback
     monitored_env = Monitor(gym_env, filename=os.path.join(profile_dir, f"drl_train_monitor_{args.make_dir_time}.csv"))
     scheduler = PPO(
         "MlpPolicy",
@@ -69,9 +70,18 @@ def main():
         gamma=float(args.scheduler_gamma),
         verbose=1,
         tensorboard_log=tb_dir,
-        device="cuda" if torch.cuda.is_available() else "cpu",
+        device="cpu",
     )
-    scheduler.learn(total_timesteps=int(args.scheduler_total_timesteps), tb_log_name="ppo_scheduler")
+    checkpoint_callback = CheckpointCallback(
+        save_freq=2000,
+        save_path=model_dir,
+        name_prefix="ppo_checkpoint",
+    )
+    scheduler.learn(
+        total_timesteps=int(args.scheduler_total_timesteps),
+        tb_log_name="ppo_scheduler",
+        callback=checkpoint_callback,
+    )
     final_path = os.path.join(model_dir, f"ppo_scheduler_{args.make_dir_time}")
     scheduler.save(final_path)
     gym_env.write_summary()

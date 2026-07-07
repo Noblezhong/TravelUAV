@@ -67,3 +67,4 @@ settings
 *.ipynb
 src/model_wrapper/utils/GroundingDINO/groundingdino_swint_ogc.pth
 src/model_wrapper/utils/__pycache__
+drl_train_*/
