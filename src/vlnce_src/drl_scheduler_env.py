@@ -48,6 +48,12 @@ ACTION_NAMES = {
     3: "CONTINUE_NO_REQUEST",
 }
 
+BUFFER_REMAINING_NORM = 7.0
+NEXT_WAYPOINT_DISTANCE_NORM_M = 1.0
+BANDWIDTH_NORM_BPS = 100_000_000.0
+STATE_DRIFT_NORM_M = 2.5
+TIME_DRIFT_NORM_MS = 5000.0
+
 
 @dataclass
 class DRLPlannerJob:
@@ -185,7 +191,7 @@ class DRLSchedulerEnv(gym.Env):
         self.max_waypoints = int(max_waypoints or args.maxWaypoints)
         self.deterministic_eval = bool(deterministic_eval)
         self.action_space = spaces.Discrete(4)
-        self.observation_space = spaces.Box(low=-10.0, high=10.0, shape=(11,), dtype=np.float32)
+        self.observation_space = spaces.Box(low=-10.0, high=10.0, shape=(6,), dtype=np.float32)
 
         os.makedirs(os.path.dirname(self.profile_log_path), exist_ok=True)
         self.profile_fp = open(self.profile_log_path, "w", encoding="utf-8")
@@ -200,6 +206,7 @@ class DRLSchedulerEnv(gym.Env):
         self.active_result: Optional[PlannerResult] = None
         self.request_counter = 0
         self.control_step = 0
+        self.scheduler_step_count = 0
         self.episode_idx = -1
         self.episode_start_perf = 0.0
         self.last_observed_bandwidth_bps = float(self.bandwidth_trace.next_bandwidth_bps())
@@ -226,6 +233,7 @@ class DRLSchedulerEnv(gym.Env):
         self.active_result = None
         self.request_counter = 0
         self.control_step = 0
+        self.scheduler_step_count = 0
 
         observed_bw = self._sample_bandwidth()
         snapshot = self.state.build_snapshot(self.request_counter, self.control_step)
@@ -243,7 +251,6 @@ class DRLSchedulerEnv(gym.Env):
             elapsed_ms=wait_ms,
             reward=0.0,
             reward_parts={"cold_start": 0.0},
-            illegal_action=False,
             terminal_reason=None,
             extra={"cold_start": True, "hover_wait_ms": wait_ms},
         )
@@ -252,16 +259,19 @@ class DRLSchedulerEnv(gym.Env):
     def step(self, action):
         assert self.state is not None and self.planner is not None
         action_id = int(action)
+        self.scheduler_step_count += 1
         step_start = time.perf_counter()
         observed_bw = self._sample_bandwidth()
         request_bw = None
-        illegal_action = False
         terminal_reason = None
         extra: Dict[str, Any] = {}
 
         applied = self._poll_and_apply_result()
         if applied is not None:
             extra["trajectory_switch_applied_before_action"] = True
+        prev_ne_m = self._current_ne_m()
+        prev_state_drift_m = self._current_drift_m()
+        prev_time_drift_ms = self._current_time_drift_ms()
 
         motion_stop, request_edge = self._decode_action(action_id)
 
@@ -276,13 +286,17 @@ class DRLSchedulerEnv(gym.Env):
                     extra["hover_wait_ms"] = float((time.perf_counter() - wait_start) * 1000.0)
                     self._apply_result(result)
                 else:
-                    illegal_action = True
                     if float(args.scheduler_idle_wait_ms) > 0:
                         time.sleep(float(args.scheduler_idle_wait_ms) / 1000.0)
+                    extra["hover_wait_ms"] = float(args.scheduler_idle_wait_ms)
+                    if not self.state.dones[0]:
+                        request_bw = observed_bw
+                        extra["stop_no_request_fallback"] = "idle_then_request"
+                        self._stop_and_request(observed_bw, extra)
         else:
             if self._buffer_remaining() <= 0:
-                illegal_action = True
                 request_bw = observed_bw
+                extra["forced_fallback"] = "empty_buffer_stop_request"
                 self._stop_and_request(observed_bw, extra)
             else:
                 self._execute_one_waypoint(extra)
@@ -292,11 +306,26 @@ class DRLSchedulerEnv(gym.Env):
 
         self._poll_and_apply_result()
         terminated, terminal_reason = self._check_terminal()
+        next_ne_m = self._current_ne_m()
+        next_state_drift_m = self._current_drift_m()
+        next_time_drift_ms = self._current_time_drift_ms()
+        ne_progress_m = 0.0 if prev_ne_m is None or next_ne_m is None else float(prev_ne_m - next_ne_m)
+        state_drift_delta_m = max(0.0, next_state_drift_m - prev_state_drift_m)
+        time_drift_delta_ms = max(0.0, next_time_drift_ms - prev_time_drift_ms)
+        extra["ne_before_m"] = float(prev_ne_m) if prev_ne_m is not None else None
+        extra["ne_after_m"] = float(next_ne_m) if next_ne_m is not None else None
+        extra["ne_progress_m"] = float(ne_progress_m)
+        extra["state_drift_before_m"] = float(prev_state_drift_m)
+        extra["state_drift_delta_m"] = float(state_drift_delta_m)
+        extra["time_drift_before_ms"] = float(prev_time_drift_ms)
+        extra["time_drift_delta_ms"] = float(time_drift_delta_ms)
         elapsed_ms = float((time.perf_counter() - step_start) * 1000.0)
         reward, reward_parts = self._compute_reward(
             elapsed_ms=elapsed_ms,
+            ne_progress_m=ne_progress_m,
+            state_drift_delta_m=state_drift_delta_m,
+            time_drift_delta_ms=time_drift_delta_ms,
             request_edge=request_bw is not None,
-            illegal_action=illegal_action,
             terminated=terminated,
             terminal_reason=terminal_reason,
         )
@@ -309,7 +338,6 @@ class DRLSchedulerEnv(gym.Env):
             elapsed_ms=elapsed_ms,
             reward=reward,
             reward_parts=reward_parts,
-            illegal_action=illegal_action,
             terminal_reason=terminal_reason,
             extra=extra,
         )
@@ -334,14 +362,15 @@ class DRLSchedulerEnv(gym.Env):
             "reward": _metric_summary([item.get("reward") for item in self.summary_records if item.get("record_type") == "scheduler_step"]),
             "elapsed_ms": _metric_summary([item.get("elapsed_ms") for item in self.summary_records if item.get("record_type") == "scheduler_step"]),
             "airsim_action_latency_ms": _metric_summary([item.get("airsim_action_latency_ms") for item in self.summary_records]),
-            "action_age_ms": _metric_summary([item.get("action_age_ms") for item in self.summary_records]),
+            "time_drift_ms": _metric_summary([item.get("time_drift_ms") for item in self.summary_records]),
             "state_drift_m": _metric_summary([item.get("state_drift_m") for item in self.summary_records]),
+            "ne_progress_m": _metric_summary([item.get("ne_progress_m") for item in self.summary_records]),
             "observed_bandwidth_mbps": _metric_summary([item.get("observed_bandwidth_mbps") for item in self.summary_records]),
             "request_bandwidth_mbps": _metric_summary([item.get("request_bandwidth_mbps") for item in self.summary_records]),
             "uplink_latency_ms": _metric_summary([item.get("uplink_latency_ms") for item in self.summary_records]),
             "episode_latency_ms": _metric_summary([item.get("episode_latency_ms") for item in self.summary_records if item.get("record_type") == "episode_end"]),
             "action_counts": dict(action_counts),
-            "illegal_action_count": int(sum(1 for item in self.summary_records if item.get("illegal_action"))),
+            "forced_fallback_count": int(sum(1 for item in self.summary_records if item.get("forced_fallback"))),
             "num_records": len(self.summary_records),
         }
         with open(self.summary_path, "w", encoding="utf-8") as handle:
@@ -405,23 +434,32 @@ class DRLSchedulerEnv(gym.Env):
 
     def _stop_and_request(self, bandwidth_bps: float, extra: Dict[str, Any]) -> None:
         assert self.planner is not None and self.state is not None
-        stale_discarded = False
         wait_start = time.perf_counter()
-        if self.planner.has_inflight():
-            self.planner.wait_result()
-            stale_discarded = True
+        had_inflight = self.planner.has_inflight()
         snapshot, obs_ms, dino_ms = self._capture_snapshot()
         extra["request_obs_latency_ms"] = obs_ms
         extra["request_dino_latency_ms"] = dino_ms
-        extra["stale_result_discarded"] = stale_discarded
+        extra["stale_result_discarded"] = False
         if snapshot is None or self.state.dones[0]:
             extra["hover_wait_ms"] = float((time.perf_counter() - wait_start) * 1000.0)
             return
         self.planner.submit(snapshot, bandwidth_bps)
-        result = self.planner.wait_result()
+        result = self._wait_for_request_result(snapshot.request_id, extra)
         self._apply_result(result)
         extra["submitted_request_id"] = int(snapshot.request_id)
+        extra["had_inflight_before_stop_request"] = bool(had_inflight)
         extra["hover_wait_ms"] = float((time.perf_counter() - wait_start) * 1000.0)
+
+    def _wait_for_request_result(self, request_id: int, extra: Dict[str, Any]) -> PlannerResult:
+        assert self.planner is not None
+        discarded = 0
+        while True:
+            result = self.planner.wait_result()
+            if int(result.request_id) == int(request_id):
+                extra["discarded_stale_results"] = int(discarded)
+                extra["stale_result_discarded"] = bool(discarded > 0)
+                return result
+            discarded += 1
 
     def _execute_one_waypoint(self, extra: Dict[str, Any]) -> None:
         assert self.state is not None
@@ -449,57 +487,60 @@ class DRLSchedulerEnv(gym.Env):
             return True, "done"
         if self.control_step >= self.max_waypoints:
             return True, "max_waypoints"
+        if self.scheduler_step_count >= int(args.scheduler_max_steps):
+            return True, "max_scheduler_steps"
         return False, None
 
     def _compute_reward(
         self,
         elapsed_ms: float,
+        ne_progress_m: float,
+        state_drift_delta_m: float,
+        time_drift_delta_ms: float,
         request_edge: bool,
-        illegal_action: bool,
         terminated: bool,
         terminal_reason: Optional[str],
     ) -> Tuple[float, Dict[str, float]]:
-        drift_m = self._current_drift_m()
+        ne_progress_reward = float(args.scheduler_ne_progress_weight) * float(
+            np.clip(ne_progress_m / float(args.scheduler_ne_norm_m), -1.0, 1.0)
+        )
         time_penalty = -float(args.scheduler_time_weight) * elapsed_ms / float(args.scheduler_time_norm_ms)
-        drift_penalty = -float(args.scheduler_drift_weight) * drift_m / float(args.scheduler_drift_norm_m)
+        drift_penalty = -float(args.scheduler_drift_weight) * state_drift_delta_m / float(args.scheduler_drift_norm_m)
+        time_drift_penalty = -float(args.scheduler_time_drift_weight) * time_drift_delta_ms / float(args.scheduler_time_drift_norm_ms)
         request_penalty = -float(args.scheduler_request_weight) if request_edge else 0.0
-        illegal_penalty = -float(args.scheduler_illegal_weight) if illegal_action else 0.0
         terminal_reward = 0.0
         if terminated:
-            if terminal_reason in ("success", "oracle_success"):
+            if terminal_reason == "success":
                 terminal_reward = float(args.scheduler_success_reward)
+            elif terminal_reason == "oracle_success":
+                terminal_reward = float(args.scheduler_oracle_success_reward)
             elif terminal_reason == "collision":
                 terminal_reward = -float(args.scheduler_collision_penalty)
-            elif terminal_reason in ("max_waypoints", "done"):
+            elif terminal_reason in ("max_waypoints", "max_scheduler_steps", "done"):
                 terminal_reward = -float(args.scheduler_failure_penalty)
-        reward = time_penalty + drift_penalty + request_penalty + illegal_penalty + terminal_reward
+        reward = ne_progress_reward + time_penalty + drift_penalty + time_drift_penalty + request_penalty + terminal_reward
         return reward, {
+            "ne_progress": ne_progress_reward,
             "time": time_penalty,
-            "drift": drift_penalty,
+            "state_drift_delta": drift_penalty,
+            "time_drift_delta": time_drift_penalty,
             "request": request_penalty,
-            "illegal": illegal_penalty,
             "terminal": terminal_reward,
         }
 
     def _build_observation(self, observed_bandwidth_bps: Optional[float] = None) -> np.ndarray:
         assert self.state is not None
-        pose = np.asarray(self.state.current_sim_pose(), dtype=np.float32)
         if observed_bandwidth_bps is None:
             observed_bandwidth_bps = self.last_observed_bandwidth_bps
         next_distance = self._next_waypoint_distance_m()
         obs = np.asarray(
             [
-                pose[0] / 200.0,
-                pose[1] / 200.0,
-                pose[2] / 50.0,
-                float(self._buffer_remaining()) / 7.0,
-                next_distance / 20.0,
-                float(observed_bandwidth_bps) / 100_000_000.0,
+                float(self._buffer_remaining()) / BUFFER_REMAINING_NORM,
+                next_distance / NEXT_WAYPOINT_DISTANCE_NORM_M,
+                float(observed_bandwidth_bps) / BANDWIDTH_NORM_BPS,
                 1.0 if self.planner is not None and self.planner.has_inflight() else 0.0,
-                self._current_drift_m() / 2.5,
-                self._current_action_age_ms() / 5000.0,
-                float(self.control_step) / max(1.0, float(self.max_waypoints)),
-                1.0 if self.active_result is not None else 0.0,
+                self._current_drift_m() / float(args.scheduler_drift_norm_m or STATE_DRIFT_NORM_M),
+                self._current_time_drift_ms() / float(args.scheduler_time_drift_norm_ms or TIME_DRIFT_NORM_MS),
             ],
             dtype=np.float32,
         )
@@ -509,9 +550,10 @@ class DRLSchedulerEnv(gym.Env):
         return {
             "episode_idx": int(self.episode_idx),
             "control_step": int(self.control_step),
+            "scheduler_step_count": int(self.scheduler_step_count),
             "buffer_remaining": int(self._buffer_remaining()),
             "state_drift_m": float(self._current_drift_m()),
-            "action_age_ms": float(self._current_action_age_ms()),
+            "time_drift_ms": float(self._current_time_drift_ms()),
             "terminal_reason": terminal_reason,
         }
 
@@ -528,9 +570,14 @@ class DRLSchedulerEnv(gym.Env):
             return 0.0
         return float(_active_state_drift_m(self.active_result, self.state.current_sim_pose()))
 
-    def _current_action_age_ms(self) -> float:
+    def _current_time_drift_ms(self) -> float:
         value = _active_action_delay_ms(self.active_result)
         return 0.0 if value is None else float(value)
+
+    def _current_ne_m(self) -> Optional[float]:
+        if self.state is None or not self.state.distance_to_ends:
+            return None
+        return float(self.state.distance_to_ends[-1])
 
     def _log_record(
         self,
@@ -541,7 +588,6 @@ class DRLSchedulerEnv(gym.Env):
         elapsed_ms: float,
         reward: float,
         reward_parts: Dict[str, float],
-        illegal_action: bool,
         terminal_reason: Optional[str],
         extra: Dict[str, Any],
     ) -> None:
@@ -556,6 +602,7 @@ class DRLSchedulerEnv(gym.Env):
             "motion_decision": "STOP" if int(action_id) in (0, 1) else "CONTINUE",
             "request_decision": "REQUEST" if int(action_id) in (0, 2) else "NO_REQUEST",
             "control_step": int(self.control_step),
+            "scheduler_step_count": int(self.scheduler_step_count),
             "buffer_remaining": int(self._buffer_remaining()),
             "planner_has_inflight": bool(self.planner.has_inflight() if self.planner is not None else False),
             "active_request_id": int(self.active_result.request_id) if self.active_result is not None else None,
@@ -576,14 +623,13 @@ class DRLSchedulerEnv(gym.Env):
                 else None
             ),
             "state_drift_m": float(self._current_drift_m()),
-            "action_age_ms": float(self._current_action_age_ms()),
+            "time_drift_ms": float(self._current_time_drift_ms()),
             "current_pose": copy.deepcopy(self.state.current_sim_pose()),
             "next_waypoint_distance_m": float(self._next_waypoint_distance_m()),
             "airsim_action_latency_ms": float(extra.get("airsim_action_latency_ms", 0.0)),
             "elapsed_ms": float(elapsed_ms),
             "reward": float(reward),
             "reward_parts": copy.deepcopy(reward_parts),
-            "illegal_action": bool(illegal_action),
             "terminal_reason": terminal_reason,
             "predict_dones": [bool(x) for x in self.state.predict_dones],
             "collisions": [bool(x) for x in self.state.collisions],
@@ -608,6 +654,7 @@ class DRLSchedulerEnv(gym.Env):
             "oracle_success": bool(self.state.oracle_success),
             "collision": bool(self.state.collisions[0]),
             "control_steps": int(self.control_step),
+            "scheduler_steps": int(self.scheduler_step_count),
             "final_ne_m": float(self.state.distance_to_ends[-1]) if self.state.distance_to_ends else None,
             "episode_latency_ms": episode_latency_ms,
             "num_episode_records": len(self.episode_records),

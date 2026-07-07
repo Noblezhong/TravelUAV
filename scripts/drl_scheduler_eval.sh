@@ -20,6 +20,7 @@ CUDA_VISIBLE_DEVICES=0 python -u $root_dir/src/vlnce_src/drl_scheduler_eval.py \
     --always_help True \
     --use_gt True \
     --maxWaypoints 200 \
+    --scheduler_max_steps 800 \
     --enable_comm_delay $enable_comm_delay \
     --comm_trace_csv_path $root_dir/bandwidth/ucc4g_bandwidth_trace.csv \
     --scheduler_model_path "$scheduler_model_path" \

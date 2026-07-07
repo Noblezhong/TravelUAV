@@ -68,3 +68,5 @@ settings
 src/model_wrapper/utils/GroundingDINO/groundingdino_swint_ogc.pth
 src/model_wrapper/utils/__pycache__
 drl_train_*/
+drl_scheduler_seen_curriculum.json
+drl_scheduler_seen_curriculum_manifest.json

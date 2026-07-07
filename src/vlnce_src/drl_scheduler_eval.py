@@ -90,12 +90,12 @@ def main():
         "avg_waypoints": float(np.mean([item.get("control_steps", 0) for item in episode_records])) if episode_records else 0.0,
         "avg_NE_m": float(np.mean([item.get("final_ne_m", 0.0) for item in episode_records if item.get("final_ne_m") is not None])) if episode_records else 0.0,
         "avg_episode_latency_ms": _metric_summary([item.get("episode_latency_ms") for item in episode_records]),
-        "avg_action_delay_ms": _metric_summary([item.get("action_age_ms") for item in step_records]),
+        "avg_time_drift_ms": _metric_summary([item.get("time_drift_ms") for item in step_records]),
         "avg_state_drift_m": _metric_summary([item.get("state_drift_m") for item in step_records]),
         "avg_T_action_ms": _metric_summary([item.get("airsim_action_latency_ms") for item in step_records]),
         "avg_T_dec_ms": _metric_summary([item.get("decision_total_latency_ms") for item in step_records if item.get("decision_total_latency_ms") is not None]),
         "action_counts": action_counts,
-        "illegal_action_count": int(sum(1 for item in step_records if item.get("illegal_action"))),
+        "forced_fallback_count": int(sum(1 for item in step_records if item.get("forced_fallback"))),
     }
     final_summary_path = os.path.join(profile_dir, f"drl_eval_metrics_{args.make_dir_time}.json")
     with open(final_summary_path, "w", encoding="utf-8") as handle:
