@@ -106,7 +106,7 @@ class AirVLNENV:
         self.scenes = set(scenes)
         self.sim_states: Optional[List[SimState]] = [None for _ in range(batch_size)]
         self.last_using_map_list = []
-        self.one_scene_could_use_num = 5e3
+        self.one_scene_could_use_num = float(args.max_episodes_per_scene)
         self.this_scene_used_cnt = 0
         self.init_VectorEnvUtil()
 
