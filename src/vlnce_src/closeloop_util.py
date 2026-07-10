@@ -117,6 +117,17 @@ def target_distance_increasing_for_10frames(lst):
             return False
     return True
 
+
+def target_distance_regression(lst, frames: int = 10):
+    if len(lst) < frames:
+        return False
+    sublist = lst[-frames:]
+    for i in range(1, len(sublist)):
+        if sublist[i] < sublist[i - 1]:
+            return False
+    return True
+
+
 class BatchIterator:
     def __init__(self, env: AirVLNENV):
         self.env = env
@@ -290,13 +301,18 @@ class EvalBatchState:
             if self.predict_dones[i] and not self.skips[i]:
                 if self.distance_to_ends[i][-1] <= 20 and not self.early_end[i]:
                     self.success[i] = True
+                    self.dones[i] = True
                 elif self.distance_to_ends[i][-1] > 20:
                     self.early_end[i] = True
-                # CMA: STOP action → always end episode (matches AerialVLN behavior)
-                # Success = distance <= 20m, otherwise final position is recorded as-is
-                if self.predict_dones[i]:
-                    self.dones[i] = True
                     
+    # ── TERMINATION (stop-and-go paradigm) ──────────────────────────
+    # Three sources: collision / DINO (vision) / NE-trend (geometry).
+    # DINO predicts done + NE > 20 m → early_end flag ONLY (not done).
+    # oracle_success is a PASSIVE post-hoc flag — NEVER terminates.
+    # This is the *reference implementation*; hybrid_eval, continue_eval,
+    # and drl_scheduler_env MUST match this contract.
+    # DO NOT modify without updating ALL paradigms.
+    # ──────────────────────────────────────────────────────────────────
     def check_batch_termination(self, t):
         for i in range(self.batch_size):
             if t == args.maxWaypoints:

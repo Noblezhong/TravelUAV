@@ -424,8 +424,6 @@ class ContinuousEpisodeState:
                 self.dones[0] = True
             elif current_distance > 20:
                 self.early_end = True
-            if self.oracle_success and self.early_end:
-                self.dones[0] = True
         return dino_latency_ms
 
     def maybe_finalize(self, force=False) -> bool:

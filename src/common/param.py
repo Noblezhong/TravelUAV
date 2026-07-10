@@ -28,7 +28,8 @@ class CommonArguments:
     edge_vlm_port: int = field(default=26000, metadata={"help": "edge VLM server port"})
     coarse_goal_min_distance: float = field(default=0.5, metadata={"help": "deprecated; accepted for old edge DNN scripts but no longer used"})
     scheduler_model_path: Optional[str] = field(default=None, metadata={"help": "PPO scheduler model path for DRL scheduler eval"})
-    scheduler_total_timesteps: int = field(default=10000, metadata={"help": "total PPO timesteps for DRL scheduler training"})
+    scheduler_total_episodes: int = field(default=200, metadata={"help": "total episodes for DRL scheduler training (primary stopping criterion)"})
+    scheduler_total_timesteps: int = field(default=100000, metadata={"help": "max PPO timesteps for DRL scheduler training (safety cap)"})
     scheduler_max_steps: int = field(default=800, metadata={"help": "max scheduler decisions per episode for DRL scheduler"})
     scheduler_learning_rate: float = field(default=0.0003, metadata={"help": "PPO learning rate for DRL scheduler"})
     scheduler_n_steps: int = field(default=64, metadata={"help": "PPO rollout n_steps for DRL scheduler"})
@@ -47,6 +48,7 @@ class CommonArguments:
     scheduler_oracle_success_reward: float = field(default=20.0, metadata={"help": "terminal reward for OSR-only navigation success"})
     scheduler_collision_penalty: float = field(default=20.0, metadata={"help": "terminal penalty for collision"})
     scheduler_failure_penalty: float = field(default=10.0, metadata={"help": "terminal penalty for failure or maxWaypoints"})
+    scheduler_illegal_action_penalty: float = field(default=5.0, metadata={"help": "penalty for choosing an illegal action in the current state"})
     scheduler_idle_wait_ms: float = field(default=100.0, metadata={"help": "small hover duration for STOP_NO_REQUEST when no request is in flight"})
 
     dagger_it: int = field(default=1)
@@ -87,6 +89,7 @@ class CommonArguments:
     train_json_path: Optional[str] = field(default=None)
     object_name_json_path: Optional[str] = field(default=None)
     map_spawn_area_json_path: Optional[str] = field(default=None)
+    max_episodes_per_scene: int = field(default=5000, metadata={"help": "max episodes per scene before forced UE4 restart"})
     
 @dataclass
 class DataArguments:

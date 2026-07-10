@@ -26,7 +26,6 @@ from src.vlnce_src.closeloop_util import (
     is_dist_avail_and_initialized,
     save_to_dataset_eval,
     setup,
-    target_distance_increasing_for_10frames,
 )
 from src.vlnce_src.comm_delay import (
     BandwidthTrace,
@@ -306,6 +305,16 @@ def _load_object_description():
 
 
 class ContinuousEpisodeState:
+    """Per-episode state for the Continuous evaluation paradigm.
+
+    ============
+    TERMINATION — see ``hybrid_eval.py`` ``ContinuousEpisodeState`` for the
+    authoritative contract.  This class shares the same three termination
+    sources (collision / DINO / NE-trend) plus safety caps.  DO NOT modify
+    termination logic here without updating ALL paradigms.
+    ============
+    """
+
     def __init__(self, env_batch, eval_env: AirVLNENV, assist: Assist, ignore_tiny_diff: bool = False):
         self.eval_env = eval_env
         self.assist = assist
@@ -325,6 +334,7 @@ class ContinuousEpisodeState:
         self.early_end = False
         self.skip_saved = False
         self.distance_to_ends: List[float] = []
+        self.request_ne_history: List[float] = []
         self.last_observation_timestamp: Optional[int] = None
 
         outputs = self.eval_env.reset()
@@ -352,6 +362,30 @@ class ContinuousEpisodeState:
             )
         )
 
+    REQUEST_REGRESSION_COUNT = 10
+
+    def record_request_ne(self) -> None:
+        """Record NE after a REQUEST completes and check regression.
+
+        Distance regression is measured per **REQUEST cycle**, matching the
+        original stop-and-go paradigm.
+        """
+        current_ne = self._calculate_distance_from_position(self.current_sim_pose())
+        self.request_ne_history.append(current_ne)
+        if len(self.request_ne_history) < self.REQUEST_REGRESSION_COUNT:
+            return
+        recent = self.request_ne_history[-self.REQUEST_REGRESSION_COUNT:]
+        if all(recent[i] <= recent[i + 1] for i in range(len(recent) - 1)):
+            self.dones[0] = True
+
+    def _calculate_distance_from_position(self, position) -> float:
+        return float(
+            np.linalg.norm(
+                np.asarray(position, dtype=np.float64)
+                - np.asarray(self.target_position, dtype=np.float64)
+            )
+        )
+
     def current_sim_pose(self) -> List[float]:
         return copy.deepcopy(self.eval_env.sim_states[0].pose[0:3])
 
@@ -362,9 +396,6 @@ class ContinuousEpisodeState:
         self.collisions = collision_flags
         self.oracle_success = bool(oracle_success[0])
         self._append_unique_observations(observations[0])
-        if target_distance_increasing_for_10frames(self.distance_to_ends):
-            self.collisions[0] = True
-            self.dones[0] = True
 
     def build_snapshot(
         self,
@@ -405,8 +436,6 @@ class ContinuousEpisodeState:
                 self.dones[0] = True
             elif current_distance > 20:
                 self.early_end = True
-            if self.oracle_success and self.early_end:
-                self.dones[0] = True
         return dino_latency_ms
 
     def maybe_finalize(self, force=False) -> bool:
@@ -443,6 +472,9 @@ def _run_decision_cycle(
     obs_end = time.perf_counter()
     state.process_env_output(outputs)
     decision_obs_latency_ms = float((obs_end - obs_start) * 1000.0)
+
+    if not state.dones[0]:
+        state.record_request_ne()
 
     if not state.dones[0]:
         dino_latency_ms = state.run_dino_and_update_metric(model_wrapper)
@@ -647,6 +679,7 @@ def eval(
                         warmup_hover_ms = (time.perf_counter() - warmup_hover_start) * 1000.0
                         active_traj = copy.deepcopy(warmup_result.refined_waypoints)
                         active_index = 0
+                        state.record_request_ne()
                         current_pose = state.current_sim_pose()
                         warmup_record = _build_planner_decision_record(
                             env_batchs[0],

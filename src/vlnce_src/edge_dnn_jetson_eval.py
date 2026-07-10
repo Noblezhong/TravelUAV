@@ -186,8 +186,6 @@ class EdgeDNNContinuousState:
                 self.dones[0] = True
             elif distance_to_target_m > 20:
                 self.early_end = True
-            if self.oracle_success and self.early_end:
-                self.dones[0] = True
 
 
     def build_snapshot(self, request_id: int, submitted_step: int) -> EdgeSnapshot:

@@ -27,6 +27,7 @@ from src.vlnce_src.closeloop_util import (
     save_to_dataset_eval,
     setup,
     target_distance_increasing_for_10frames,
+    target_distance_regression,
 )
 from src.vlnce_src.comm_delay import (
     BandwidthTrace,
@@ -457,6 +458,49 @@ def _load_object_description():
 
 
 class ContinuousEpisodeState:
+    """Per-episode state shared by Hybrid eval and DRL scheduler.
+
+    ============
+    TERMINATION  (DO NOT MODIFY without updating ALL paradigms)
+    ============
+
+    This file, ``continue_eval.py``, ``closeloop_util.py``, and
+    ``drl_scheduler_env.py`` MUST share the same episode-level
+    termination contract.  The three termination sources are:
+
+    ┌─ Collision ─────────────────────────────────────────────┐
+    │  Sim reports ``is_collisioned`` → dones=True             │
+    └──────────────────────────────────────────────────────────┘
+
+    ┌─ DINO (vision) ─────────────────────────────────────────┐
+    │  DINO predicts done + NE ≤ 20 m  → success + dones (SR)  │
+    │  DINO predicts done + NE > 20 m  → early_end flag ONLY   │
+    │  (early_end does NOT terminate — lets episode continue   │
+    │   so DINO can retry at closer range)                     │
+    └──────────────────────────────────────────────────────────┘
+
+    ┌─ NE trend (geometry) ───────────────────────────────────┐
+    │  10 consecutive completed REQUESTs where NE did *not*    │
+    │  decrease → dones=True  ("distance regression").         │
+    │  Measured per REQUEST cycle, NOT per waypoint.          │
+    └──────────────────────────────────────────────────────────┘
+
+    ┌─ Safety caps ───────────────────────────────────────────┐
+    │  control_step  ≥ maxWaypoints        → dones=True        │
+    │  scheduler_step ≥ scheduler_max_steps → (DRL only)       │
+    └──────────────────────────────────────────────────────────┘
+
+    Post-hoc classification (episode-end, same across paradigms):
+        success=True          → SR  (Success Rate)
+        oracle_success=True   → OSR (Oracle – ever within 20 m)
+        collision=True        → CR
+        otherwise             → Failure
+
+    ``oracle_success`` is a PASSIVE FLAG set by the sim whenever
+    a waypoint falls within SUCCESS_DISTANCE of the target.  It
+    NEVER triggers termination on its own.
+    """
+
     def __init__(self, env_batch, eval_env: AirVLNENV, assist: Assist, ignore_tiny_diff: bool = False):
         self.eval_env = eval_env
         self.assist = assist
@@ -476,6 +520,7 @@ class ContinuousEpisodeState:
         self.early_end = False
         self.skip_saved = False
         self.distance_to_ends: List[float] = []
+        self.request_ne_history: List[float] = []
         self.last_observation_timestamp: Optional[int] = None
 
         outputs = self.eval_env.reset()
@@ -516,8 +561,23 @@ class ContinuousEpisodeState:
         if bool(getattr(sim_state, "oracle_success", False)):
             self.oracle_success = True
         self.distance_to_ends.append(self._calculate_distance_from_position(self.current_sim_pose()))
-        if target_distance_increasing_for_10frames(self.distance_to_ends):
-            self.collisions[0] = True
+
+    REQUEST_REGRESSION_COUNT = 10
+
+    def record_request_ne(self) -> None:
+        """Record NE after a REQUEST completes and check regression.
+
+        Distance regression is measured per **REQUEST cycle**, matching the
+        original stop-and-go paradigm.  If NE has increased after each of the
+        last ``REQUEST_REGRESSION_COUNT`` completed REQUESTs the drone is
+        getting further from the target — mark as done.
+        """
+        current_ne = self._calculate_distance_from_position(self.current_sim_pose())
+        self.request_ne_history.append(current_ne)
+        if len(self.request_ne_history) < self.REQUEST_REGRESSION_COUNT:
+            return
+        recent = self.request_ne_history[-self.REQUEST_REGRESSION_COUNT:]
+        if all(recent[i] <= recent[i + 1] for i in range(len(recent) - 1)):
             self.dones[0] = True
 
     def _calculate_distance_from_position(self, position) -> float:
@@ -535,9 +595,6 @@ class ContinuousEpisodeState:
         self.collisions = collision_flags
         self.oracle_success = bool(oracle_success[0])
         self._append_unique_observations(observations[0])
-        if target_distance_increasing_for_10frames(self.distance_to_ends):
-            self.collisions[0] = True
-            self.dones[0] = True
 
     def build_snapshot(
         self,
@@ -578,8 +635,6 @@ class ContinuousEpisodeState:
                 self.dones[0] = True
             elif current_distance > 20:
                 self.early_end = True
-            if self.oracle_success and self.early_end:
-                self.dones[0] = True
         return dino_latency_ms
 
     def maybe_finalize(self, force=False) -> bool:

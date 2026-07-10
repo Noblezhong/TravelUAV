@@ -211,6 +211,7 @@ class DRLSchedulerEnv(gym.Env):
         self.episode_start_perf = 0.0
         self.last_observed_bandwidth_bps = float(self.bandwidth_trace.next_bandwidth_bps())
         self.closed = False
+        self._safety_last_threshold: Optional[float] = None
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None):
         super().reset(seed=seed)
@@ -234,6 +235,7 @@ class DRLSchedulerEnv(gym.Env):
         self.request_counter = 0
         self.control_step = 0
         self.scheduler_step_count = 0
+        self._safety_last_threshold = None
 
         observed_bw = self._sample_bandwidth()
         snapshot = self.state.build_snapshot(self.request_counter, self.control_step)
@@ -275,6 +277,17 @@ class DRLSchedulerEnv(gym.Env):
 
         motion_stop, request_edge = self._decode_action(action_id)
 
+        # ── hard legality guard ──────────────────────────────────────
+        legal, illegal_reason = self._check_action_legal(action_id)
+        action_illegal = not legal
+        extra["action_illegal"] = action_illegal
+        extra["action_illegal_reason"] = illegal_reason
+        if action_illegal:
+            # override to the safe fallback: STOP_REQUEST
+            motion_stop, request_edge = True, True
+            extra["action_override"] = "STOP_REQUEST"
+        # ─────────────────────────────────────────────────────────────
+
         if motion_stop:
             if request_edge:
                 request_bw = observed_bw
@@ -306,6 +319,19 @@ class DRLSchedulerEnv(gym.Env):
 
         self._poll_and_apply_result()
         terminated, terminal_reason = self._check_terminal()
+
+        # ── Safety-net DINO ──────────────────────────────────────────
+        # DINO is decoupled from REQUEST.  When PPO chose NO_REQUEST and
+        # the drone crosses a distance threshold (25 / 20 / 15 / 10 m)
+        # without running DINO, the env runs one automatically.
+        # This guarantees at least 2–4 detection shots near the target
+        # regardless of PPO's request policy.  LLM is NOT invoked.
+        # ──────────────────────────────────────────────────────────────
+        if not terminated and extra.get("request_dino_latency_ms") is None:
+            self._maybe_safety_dino(extra)
+            terminated, terminal_reason = self._check_terminal()
+        # ──────────────────────────────────────────────────────────────
+
         next_ne_m = self._current_ne_m()
         next_state_drift_m = self._current_drift_m()
         next_time_drift_ms = self._current_time_drift_ms()
@@ -328,6 +354,8 @@ class DRLSchedulerEnv(gym.Env):
             request_edge=request_bw is not None,
             terminated=terminated,
             terminal_reason=terminal_reason,
+            action_illegal=action_illegal,
+            oracle_success=bool(self.state.oracle_success),
         )
         obs = self._build_observation(observed_bw)
         self._log_record(
@@ -387,6 +415,25 @@ class DRLSchedulerEnv(gym.Env):
             return False, False
         return True, True
 
+    def _check_action_legal(self, action_id: int) -> Tuple[bool, Optional[str]]:
+        """Check whether *action_id* is legal in the current state.
+
+        Returns ``(legal, error_reason)``.  When *legal* is ``False`` the
+        action is overridden to a safe fallback (STOP_REQUEST) and the
+        step reward is lowered by ``scheduler_illegal_action_penalty``.
+        """
+        buffer_empty = self._buffer_remaining() <= 0
+        has_inflight = self.planner is not None and self.planner.has_inflight()
+        motion_stop, request_edge = self._decode_action(action_id)
+
+        if not motion_stop and buffer_empty:
+            # CONTINUE needs at least one buffered waypoint.
+            return False, "continue_on_empty_buffer"
+        if motion_stop and not request_edge and not has_inflight:
+            # STOP_NO_REQUEST makes no sense when nothing is in flight.
+            return False, "stop_no_request_without_inflight"
+        return True, None
+
     def _sample_bandwidth(self) -> float:
         self.last_observed_bandwidth_bps = float(self.bandwidth_trace.next_bandwidth_bps())
         return self.last_observed_bandwidth_bps
@@ -395,6 +442,10 @@ class DRLSchedulerEnv(gym.Env):
         self.active_result = result
         self.active_traj = copy.deepcopy(result.refined_waypoints)
         self.active_index = 0
+        # Every result application = one completed REQUEST cycle.
+        # Record NE for per-REQUEST distance regression.
+        if self.state is not None and not self.state.dones[0]:
+            self.state.record_request_ne()
 
     def _poll_and_apply_result(self) -> Optional[PlannerResult]:
         assert self.planner is not None
@@ -402,6 +453,29 @@ class DRLSchedulerEnv(gym.Env):
         if result is not None:
             self._apply_result(result)
         return result
+
+    # ── Safety-net thresholds ───────────────────────────────────────
+    _SAFETY_DINO_THRESHOLDS = (25.0, 20.0, 15.0, 10.0)
+
+    def _maybe_safety_dino(self, extra: Dict[str, Any]) -> None:
+        """Run DINO once when crossing each distance threshold, decoupled from REQUEST."""
+        ne = self._current_ne_m()
+        if ne is None or self.state.dones[0]:
+            return
+        current = self._safety_last_threshold
+        for t in sorted(self._SAFETY_DINO_THRESHOLDS, reverse=True):
+            if ne < t and (current is None or t < current):
+                self._safety_last_threshold = t
+                obs_start = time.perf_counter()
+                outputs = self.eval_env.get_obs()
+                obs_ms = float((time.perf_counter() - obs_start) * 1000.0)
+                self.state.process_env_output(outputs)
+                if not self.state.dones[0]:
+                    self.state.run_dino_and_update_metric(self.model_wrapper)
+                extra["safety_dino_triggered"] = True
+                extra["safety_dino_ne_m"] = float(ne)
+                extra["safety_dino_obs_ms"] = obs_ms
+                return
 
     def _capture_snapshot(self) -> Tuple[Optional[Snapshot], float, float]:
         assert self.state is not None
@@ -475,14 +549,22 @@ class DRLSchedulerEnv(gym.Env):
         extra["airsim_action_latency_ms"] = action_ms
         extra["executed_waypoints"] = 1
 
+    # ── TERMINATION ──────────────────────────────────────────────────
+    # Matches the unified contract in hybrid_eval.py ContinuousEpisodeState.
+    # Three sources: collision / DINO (vision) / NE-trend (geometry).
+    # oracle_success is a PASSIVE post-hoc flag — NEVER terminates.
+    # DO NOT modify without updating ALL paradigms.
+    # ──────────────────────────────────────────────────────────────────
     def _check_terminal(self) -> Tuple[bool, Optional[str]]:
         assert self.state is not None
         if self.state.collisions[0]:
             return True, "collision"
         if self.state.success:
             return True, "success"
-        if self.state.oracle_success:
-            return True, "oracle_success"
+        # oracle_success is intentionally NOT a termination condition.
+        # It is a passive flag set by the sim when NE ≤ 20 m, used
+        # post-hoc in _finalize_episode / _compute_reward — matching the
+        # original stop-and-go and continuous paradigms.
         if self.state.dones[0]:
             return True, "done"
         if self.control_step >= self.max_waypoints:
@@ -500,6 +582,8 @@ class DRLSchedulerEnv(gym.Env):
         request_edge: bool,
         terminated: bool,
         terminal_reason: Optional[str],
+        action_illegal: bool = False,
+        oracle_success: bool = False,
     ) -> Tuple[float, Dict[str, float]]:
         ne_progress_reward = float(args.scheduler_ne_progress_weight) * float(
             np.clip(ne_progress_m / float(args.scheduler_ne_norm_m), -1.0, 1.0)
@@ -508,23 +592,27 @@ class DRLSchedulerEnv(gym.Env):
         drift_penalty = -float(args.scheduler_drift_weight) * state_drift_delta_m / float(args.scheduler_drift_norm_m)
         time_drift_penalty = -float(args.scheduler_time_drift_weight) * time_drift_delta_ms / float(args.scheduler_time_drift_norm_ms)
         request_penalty = -float(args.scheduler_request_weight) if request_edge else 0.0
+        illegal_penalty = -float(args.scheduler_illegal_action_penalty) if action_illegal else 0.0
         terminal_reward = 0.0
         if terminated:
             if terminal_reason == "success":
                 terminal_reward = float(args.scheduler_success_reward)
-            elif terminal_reason == "oracle_success":
-                terminal_reward = float(args.scheduler_oracle_success_reward)
             elif terminal_reason == "collision":
                 terminal_reward = -float(args.scheduler_collision_penalty)
+            elif oracle_success:
+                # Episode ended without SR but the drone passed within
+                # 20 m of the target at some point → OSR (post-hoc flag).
+                terminal_reward = float(args.scheduler_oracle_success_reward)
             elif terminal_reason in ("max_waypoints", "max_scheduler_steps", "done"):
                 terminal_reward = -float(args.scheduler_failure_penalty)
-        reward = ne_progress_reward + time_penalty + drift_penalty + time_drift_penalty + request_penalty + terminal_reward
+        reward = ne_progress_reward + time_penalty + drift_penalty + time_drift_penalty + request_penalty + illegal_penalty + terminal_reward
         return reward, {
             "ne_progress": ne_progress_reward,
             "time": time_penalty,
             "state_drift_delta": drift_penalty,
             "time_drift_delta": time_drift_penalty,
             "request": request_penalty,
+            "illegal_action": illegal_penalty,
             "terminal": terminal_reward,
         }
 

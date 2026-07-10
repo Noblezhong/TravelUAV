@@ -59,7 +59,31 @@ def main():
         enable_comm_delay=enable_comm_delay,
         max_waypoints=args.maxWaypoints,
     )
-    from stable_baselines3.common.callbacks import CheckpointCallback
+    from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
+
+    class StopOnEpisodeCount(BaseCallback):
+        """Stop training after a target number of episodes, plus a safety timestep cap."""
+
+        def __init__(self, max_episodes: int, max_timesteps: int, verbose: int = 0):
+            super().__init__(verbose)
+            self.max_episodes = max_episodes
+            self.max_timesteps = max_timesteps
+            self._episode_count = 0
+
+        def _on_step(self) -> bool:
+            dones = self.locals.get("dones")
+            if dones is not None and any(dones):
+                self._episode_count += int(sum(1 for d in dones if d))
+            if self._episode_count >= self.max_episodes:
+                if self.verbose > 0:
+                    print(f"Reached {self.max_episodes} episodes, stopping training.")
+                return False
+            if self.num_timesteps >= self.max_timesteps:
+                if self.verbose > 0:
+                    print(f"Reached {self.max_timesteps} timesteps (safety cap), stopping training.")
+                return False
+            return True
+
     monitored_env = Monitor(gym_env, filename=os.path.join(profile_dir, f"drl_train_monitor_{args.make_dir_time}.csv"))
     scheduler = PPO(
         "MlpPolicy",
@@ -68,19 +92,25 @@ def main():
         n_steps=int(args.scheduler_n_steps),
         batch_size=int(args.scheduler_batch_size),
         gamma=float(args.scheduler_gamma),
+        ent_coef=0.01,
         verbose=1,
         tensorboard_log=tb_dir,
         device="cpu",
     )
     checkpoint_callback = CheckpointCallback(
-        save_freq=2000,
+        save_freq=500,
         save_path=model_dir,
         name_prefix="ppo_checkpoint",
+    )
+    episode_callback = StopOnEpisodeCount(
+        max_episodes=int(args.scheduler_total_episodes),
+        max_timesteps=int(args.scheduler_total_timesteps),
+        verbose=1,
     )
     scheduler.learn(
         total_timesteps=int(args.scheduler_total_timesteps),
         tb_log_name="ppo_scheduler",
-        callback=checkpoint_callback,
+        callback=[checkpoint_callback, episode_callback],
     )
     final_path = os.path.join(model_dir, f"ppo_scheduler_{args.make_dir_time}")
     scheduler.save(final_path)
