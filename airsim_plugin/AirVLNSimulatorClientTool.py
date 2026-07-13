@@ -102,8 +102,10 @@ class MyThread(threading.Thread):
 
 
 class AirVLNSimulatorClientTool:
-    def __init__(self, machines_info) -> None:
+    def __init__(self, machines_info, fast_eval=False, fast_eval_speedup=5.0) -> None:
         self.machines_info = copy.deepcopy(machines_info)
+        self.fast_eval = bool(fast_eval)
+        self.fast_eval_speedup = float(fast_eval_speedup)
         self.socket_clients = []
         self.airsim_clients = [[None for _ in list(item['open_scenes'])] for item in machines_info ]
         self.airsim_ports = []
@@ -189,7 +191,14 @@ class AirVLNSimulatorClientTool:
         def _run_command(index, socket_client: msgpackrpc.Client):
             logger.info(f'开始打开场景，机器{index}: {socket_client.address._host}:{socket_client.address._port}')
             logger.info(f'gpus: {self.machines_info[index]}')
-            result = socket_client.call('reopen_scenes', socket_client.address._host, list(zip(self.machines_info[index]['open_scenes'], self.machines_info[index]['gpus'])))
+            reopen_args = (
+                socket_client.address._host,
+                list(zip(self.machines_info[index]['open_scenes'], self.machines_info[index]['gpus'])),
+            )
+            if self.fast_eval:
+                result = socket_client.call('reopen_scenes', *reopen_args, self.fast_eval_speedup)
+            else:
+                result = socket_client.call('reopen_scenes', *reopen_args)
             if result[0] == False:
                 logger.error(f'打开场景失败，机器: {socket_client.address._host}:{socket_client.address._port}')
                 raise Exception('打开场景失败')
@@ -309,6 +318,8 @@ class AirVLNSimulatorClientTool:
             airsim_client.simPause(False)
             airsim_client.simSetKinematics(start_state, ignore_collision=False)
             state_info = state_sensor.retrieve()
+            action_wall_start = time.perf_counter()
+            action_sim_start = int(state_info['timestamp'])
             airsim_client.moveOnPathAsync(path=path, 
                                 velocity=velocity, 
                                 drivetrain=drivetrain, 
@@ -322,11 +333,12 @@ class AirVLNSimulatorClientTool:
             distance = 10000
             while True:
                 time.sleep(0.005)
-                if time.perf_counter() - start_time > 5:
+                wall_timeout = time.perf_counter() - start_time > 5
+                if wall_timeout:
                     return None
-                target = path[current_idx]
                 state_info = copy.deepcopy(state_sensor.retrieve())
                 imu_info = copy.deepcopy(imu_sensor.retrieve())
+                target = path[current_idx]
                 position = np.array(state_info['position'])
                 pos_queue.append(position)
                 if len(pos_queue) == pos_queue.maxlen:
@@ -348,7 +360,14 @@ class AirVLNSimulatorClientTool:
                         distance = 10000
                 else:
                     distance = new_distance
-            return {'states': results, 'collision': collision}
+            action_wall_ms = (time.perf_counter() - action_wall_start) * 1000.0
+            action_sim_ms = max(0.0, (int(state_info['timestamp']) - action_sim_start) / 1e6)
+            return {
+                'states': results,
+                'collision': collision,
+                'wall_time_ms': action_wall_ms,
+                'sim_time_ms': action_sim_ms,
+            }
         
         threads = []
         thread_results = []
@@ -520,9 +539,16 @@ class AirVLNSimulatorClientTool:
             airsim_client.armDisarm(True)
             airsim_client.simPause(False)
             airsim_client.simSetKinematics(start_state, ignore_collision=False)
+            action_wall_start = time.perf_counter()
+            action_sim_start = None
+            state_info = None
+            if self.fast_eval:
+                state_info = copy.deepcopy(state_sensor.retrieve())
+                action_sim_start = int(state_info['timestamp'])
 
             for target in targets[:target_limit]:
                 target_start_time = time.perf_counter()
+                target_sim_start = int(state_info['timestamp']) if self.fast_eval and state_info is not None else None
                 while True:
                     state_info = copy.deepcopy(state_sensor.retrieve())
                     imu_info = copy.deepcopy(imu_sensor.retrieve())
@@ -530,7 +556,13 @@ class AirVLNSimulatorClientTool:
                     delta = target - position
                     distance = float(np.linalg.norm(delta))
 
-                    if time.perf_counter() - target_start_time > target_timeout:
+                    wall_timeout = time.perf_counter() - target_start_time > target_timeout
+                    sim_timeout = (
+                        (int(state_info['timestamp']) - target_sim_start) / 1e9 > target_timeout
+                        if self.fast_eval and target_sim_start is not None
+                        else False
+                    )
+                    if (self.fast_eval and sim_timeout) or (not self.fast_eval and wall_timeout):
                         if distance <= timeout_accept_radius:
                             logger.warning(
                                 f"velocity waypoint timeout but close enough: distance={distance:.2f}m, "
@@ -571,8 +603,20 @@ class AirVLNSimulatorClientTool:
                     break
 
             airsim_client.moveByVelocityAsync(0, 0, 0, 0.05, drivetrain=drivetrain, yaw_mode=yaw_mode).join()
+            final_state_info = copy.deepcopy(state_sensor.retrieve()) if self.fast_eval else state_info
             airsim_client.simPause(True)
-            return {'states': results, 'collision': collision}
+            action_wall_ms = (time.perf_counter() - action_wall_start) * 1000.0
+            action_sim_ms = (
+                max(0.0, (int(final_state_info['timestamp']) - action_sim_start) / 1e6)
+                if self.fast_eval and final_state_info is not None and action_sim_start is not None
+                else 0.0
+            )
+            return {
+                'states': results,
+                'collision': collision,
+                'wall_time_ms': action_wall_ms,
+                'sim_time_ms': action_sim_ms,
+            }
 
         threads = []
         thread_results = []

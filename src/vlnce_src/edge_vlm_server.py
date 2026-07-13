@@ -1,6 +1,7 @@
 import os
 import socketserver
 import sys
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,9 @@ from src.vlnce_src.edge_vlm_rpc import recv_message, send_message
 class EdgeVLMRequestHandler(socketserver.BaseRequestHandler):
     def handle(self):
         payload = recv_message(self.request)
+        # The model and GroundingDINO share one GPU. Serialize requests even
+        # though the TCP server accepts multiple clients.
+        self.server.inference_lock.acquire()
         try:
             episodes = [payload["episode"]]
             target_positions = [payload["target_position"]]
@@ -53,6 +57,8 @@ class EdgeVLMRequestHandler(socketserver.BaseRequestHandler):
                 "request_id": payload.get("request_id"),
                 "error": repr(exc),
             }
+        finally:
+            self.server.inference_lock.release()
         send_message(self.request, response)
 
 
@@ -68,6 +74,7 @@ def main():
     with ThreadedEdgeVLMServer((args.edge_vlm_bind_host, int(args.edge_vlm_port)), EdgeVLMRequestHandler) as server:
         server.model_wrapper = model_wrapper
         server.dino_monitor = dino_monitor
+        server.inference_lock = threading.Lock()
         print(f"Edge VLM server listening on {args.edge_vlm_bind_host}:{args.edge_vlm_port}", flush=True)
         server.serve_forever()
 

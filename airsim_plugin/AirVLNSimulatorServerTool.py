@@ -462,13 +462,14 @@ class EventHandler(object):
         self.scene_gpus = scene_gpus
 
         self.scene_used_ports = []
+        self.scene_lock = threading.Lock()
         
         self.port_to_scene = {}
 
     def ping(self) -> bool:
         return True
 
-    def _open_scenes(self, ip: str , scen_id_gpu_list: list):
+    def _open_scenes(self, ip: str, scen_id_gpu_list: list, clock_speed=None):
         print(
             "{}\t关闭场景中".format(
                 str(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())),
@@ -523,7 +524,8 @@ class EventHandler(object):
         p_s = []
         for index, (scen_id, gpu_id) in enumerate(scen_id_gpu_list):
             # airsim settings 4
-            airsim_settings = create_drones(clock_speed=args.clock_speed)
+            effective_clock_speed = args.clock_speed if clock_speed is None else float(clock_speed)
+            airsim_settings = create_drones(clock_speed=effective_clock_speed)
             airsim_settings['ApiServerPort'] = int(ports[index])
             self.port_to_scene[ports[index]] = (scen_id, gpu_id)
             airsim_settings_write_content = json.dumps(airsim_settings)
@@ -621,7 +623,7 @@ class EventHandler(object):
                         shell=True,
                     )
         
-    def reopen_scenes(self, ip: str, scen_id_gpu_list: list):
+    def reopen_scenes(self, ip: str, scen_id_gpu_list: list, clock_speed=None):
         print(
             "{}\tSTART reopen_scenes".format(
                 str(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())),
@@ -637,7 +639,10 @@ class EventHandler(object):
                     pass
                 if isinstance(item[0], bytes):
                     item[0] = item[0].decode('utf-8')
-            result = self._open_scenes(ip, scen_id_gpu_list)
+            # A second client must not kill/reuse ports while the first client
+            # is still waiting for its UE/AirSim scene to become ready.
+            with self.scene_lock:
+                result = self._open_scenes(ip, scen_id_gpu_list, clock_speed=clock_speed)
         except Exception as e:
             print(e)
             exe_type, exe_value, exe_traceback = sys.exc_info()
@@ -661,8 +666,9 @@ class EventHandler(object):
         )
 
         try:
-            KillPorts(self.scene_used_ports)
-            self.scene_used_ports = []
+            with self.scene_lock:
+                KillPorts(self.scene_used_ports)
+                self.scene_used_ports = []
 
             result = True
         except Exception as e:

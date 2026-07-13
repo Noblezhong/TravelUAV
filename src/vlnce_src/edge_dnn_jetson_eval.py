@@ -37,6 +37,12 @@ from src.vlnce_src.comm_delay import (
     estimate_uplink_payload_bits_from_episodes,
 )
 from src.vlnce_src.edge_vlm_rpc import request as rpc_request
+from src.vlnce_src.fast_eval_time import (
+    FastEvalClock,
+    FastResultTiming,
+    action_timing,
+    configure_fast_eval_output,
+)
 from utils.logger import logger
 from utils.utils import *
 
@@ -54,6 +60,9 @@ class EdgeSnapshot:
     observation_rotation: List[List[float]]
     submitted_perf_time: float
     submitted_wall_time: float
+    submitted_logical_ms: Optional[float] = None
+    payload_bits: int = 0
+    payload_mb: float = 0.0
 
 
 @dataclass
@@ -66,11 +75,16 @@ class EdgeCoarseResult:
     submitted_perf_time: float
     submitted_wall_time: float
     ready_wall_time: float
+    submitted_logical_ms: Optional[float]
+    edge_arrival_logical_ms: Optional[float]
+    ready_logical_ms: Optional[float]
+    applied_logical_ms: Optional[float]
     coarse_local: Optional[List[float]]
     coarse_goal_world: Optional[List[float]]
     coarse_goal_world_source: str
     legacy_body_goal_world: Optional[List[float]]
     edge_llm_latency_ms: float
+    edge_compute_latency_ms: float
     uplink_payload_bits: int
     uplink_payload_mb: float
     uplink_bandwidth_mbps: float
@@ -112,6 +126,28 @@ def _has_executable_waypoints(refined_waypoints) -> bool:
     if len(arr) < 1 or not np.all(np.isfinite(arr)):
         return False
     return True
+
+
+def _compact_episode_for_edge(episode: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Keep the history features but send images only for the latest frame."""
+    compact = []
+    last_index = len(episode) - 1
+    for index, observation in enumerate(episode):
+        item = {
+            "instruction": observation.get("instruction", ""),
+            "sensors": copy.deepcopy(observation.get("sensors", {})),
+            # Presence of this key preserves the original history_waypoint
+            # construction; old frames intentionally carry no image data.
+            "rgb": copy.deepcopy(observation.get("rgb", [])) if index == last_index else [],
+            "rgb_record": (
+                copy.deepcopy(observation.get("rgb_record", [])) if index == last_index else []
+            ),
+            "depth_record": (
+                copy.deepcopy(observation.get("depth_record", [])) if index == last_index else []
+            ),
+        }
+        compact.append(item)
+    return compact
 
 
 class EdgeDNNContinuousState:
@@ -190,10 +226,13 @@ class EdgeDNNContinuousState:
 
     def build_snapshot(self, request_id: int, submitted_step: int) -> EdgeSnapshot:
         latest = self.episode[-1]
+        # Preserve the existing communication-delay accounting while keeping
+        # large historical image arrays out of the cross-process snapshot.
+        _, payload_bits, payload_mb = estimate_uplink_payload_bits_from_episodes([self.episode])
         return EdgeSnapshot(
             request_id=request_id,
             submitted_step=submitted_step,
-            episode=copy.deepcopy(self.episode),
+            episode=_compact_episode_for_edge(self.episode),
             target_position=copy.deepcopy(self.target_position),
             object_info=self.object_info,
             assist_notice=self.assist.get_assist_notice(
@@ -207,6 +246,8 @@ class EdgeDNNContinuousState:
             observation_rotation=copy.deepcopy(latest["sensors"]["imu"]["rotation"]),
             submitted_perf_time=time.perf_counter(),
             submitted_wall_time=time.time(),
+            payload_bits=int(payload_bits),
+            payload_mb=float(payload_mb),
         )
 
     def maybe_finalize(self, force=False) -> bool:
@@ -225,12 +266,36 @@ class EdgeDNNContinuousState:
         return self.skip_saved
 
 
+def _action_delay_ms(result: EdgeCoarseResult, clock: FastEvalClock) -> float:
+    return clock.age_ms(result.submitted_logical_ms, result.submitted_perf_time)
+
+
+def _mark_result_applied(result: EdgeCoarseResult, clock: FastEvalClock) -> EdgeCoarseResult:
+    result.applied_logical_ms = clock.now_ms if clock.enabled else None
+    return result
+
+
+def _snapshot_with_clock(state: EdgeDNNContinuousState, request_id: int, exec_step: int, clock: FastEvalClock):
+    snapshot = state.build_snapshot(request_id, exec_step)
+    snapshot.submitted_logical_ms = clock.now_ms if clock.enabled else None
+    return snapshot
+
+
 class LatestOnlyEdgeVLMClient:
-    def __init__(self, host: str, port: int, bandwidth_trace: BandwidthTrace, enable_comm_delay: bool):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        bandwidth_trace: BandwidthTrace,
+        enable_comm_delay: bool,
+        clock: Optional[FastEvalClock] = None,
+    ):
         self.host = host
         self.port = int(port)
         self.bandwidth_trace = bandwidth_trace
         self.enable_comm_delay = bool(enable_comm_delay)
+        self.clock = clock or FastEvalClock(False)
+        self.fast_eval = bool(self.clock.enabled)
         self._condition = threading.Condition()
         self._pending_snapshot: Optional[EdgeSnapshot] = None
         self._result: Optional[EdgeCoarseResult] = None
@@ -259,6 +324,13 @@ class LatestOnlyEdgeVLMClient:
                 raise self._error
             if not self._has_result:
                 return None
+            if (
+                self.fast_eval
+                and self._result is not None
+                and self._result.ready_logical_ms is not None
+                and self.clock.now_ms < self._result.ready_logical_ms
+            ):
+                return None
             result = self._result
             self._result = None
             self._has_result = False
@@ -275,6 +347,8 @@ class LatestOnlyEdgeVLMClient:
             result = self._result
             self._result = None
             self._has_result = False
+            if self.fast_eval:
+                self.clock.advance_to(result.ready_logical_ms)
             return result
 
     def close(self) -> None:
@@ -310,11 +384,15 @@ class LatestOnlyEdgeVLMClient:
                 self._condition.notify_all()
 
     def _run_snapshot(self, snapshot: EdgeSnapshot) -> EdgeCoarseResult:
-        _, payload_bits, payload_mb = estimate_uplink_payload_bits_from_episodes([snapshot.episode])
+        payload_bits = int(snapshot.payload_bits)
+        payload_mb = float(snapshot.payload_mb)
+        if payload_bits <= 0:
+            _, payload_bits, payload_mb = estimate_uplink_payload_bits_from_episodes([snapshot.episode])
         bandwidth_bps = self.bandwidth_trace.next_bandwidth_bps()
         uplink_latency_ms = calculate_latency_ms(payload_bits, bandwidth_bps) if self.enable_comm_delay else 0.0
         if uplink_latency_ms > 0:
-            time.sleep(uplink_latency_ms / 1000.0)
+            divisor = self.clock.speedup if self.fast_eval else 1.0
+            time.sleep(uplink_latency_ms / (1000.0 * divisor))
 
         payload = {
             "request_id": snapshot.request_id,
@@ -325,7 +403,9 @@ class LatestOnlyEdgeVLMClient:
             "observation_pose": snapshot.observation_pose,
             "observation_rotation": snapshot.observation_rotation,
         }
+        edge_start = time.perf_counter()
         response = rpc_request(self.host, self.port, payload)
+        edge_compute_latency_ms = (time.perf_counter() - edge_start) * 1000.0
         if not response.get("ok", False):
             raise RuntimeError(response.get("error", "edge VLM request failed"))
         coarse_local = response.get("coarse_local")
@@ -341,6 +421,12 @@ class LatestOnlyEdgeVLMClient:
                 )
             else:
                 coarse_goal = np.asarray(coarse_goal, dtype=np.float64).reshape(3).tolist()
+        fast_timing = FastResultTiming(
+            snapshot.submitted_logical_ms,
+            float(uplink_latency_ms),
+            float(edge_compute_latency_ms),
+            0.0,
+        )
         return EdgeCoarseResult(
             request_id=snapshot.request_id,
             submitted_step=snapshot.submitted_step,
@@ -350,11 +436,16 @@ class LatestOnlyEdgeVLMClient:
             submitted_perf_time=snapshot.submitted_perf_time,
             submitted_wall_time=snapshot.submitted_wall_time,
             ready_wall_time=time.time(),
+            submitted_logical_ms=snapshot.submitted_logical_ms,
+            edge_arrival_logical_ms=fast_timing.edge_arrival_logical_ms,
+            ready_logical_ms=fast_timing.ready_logical_ms,
+            applied_logical_ms=None,
             coarse_local=copy.deepcopy(coarse_local),
             coarse_goal_world=coarse_goal,
             coarse_goal_world_source=coarse_goal_source,
             legacy_body_goal_world=legacy_body_goal,
             edge_llm_latency_ms=float(response["llm_latency_ms"]),
+            edge_compute_latency_ms=float(edge_compute_latency_ms),
             uplink_payload_bits=int(payload_bits),
             uplink_payload_mb=float(payload_mb),
             uplink_bandwidth_mbps=float(bandwidth_bps / 1_000_000.0),
@@ -369,8 +460,8 @@ def _load_object_description():
         return {item["object_name"]: item["object_desc"] for item in json.load(handle)}
 
 
-def _configure_jetson_air_sim_server():
-    args.machines_info[0]["MACHINE_IP"] = "192.168.105.17"
+def _configure_local_air_sim_server():
+    args.machines_info[0]["MACHINE_IP"] = "127.0.0.1"
 
 
 def _print_episode_header(episode_idx, env_batch, chunk_waypoints):
@@ -432,11 +523,13 @@ def eval(
 
                 episode_ok = False
                 for retry_i in range(3):
+                    episode_clock = FastEvalClock(bool(args.fast_eval), args.fast_eval_speedup)
                     edge_client = LatestOnlyEdgeVLMClient(
                         args.edge_vlm_host,
                         args.edge_vlm_port,
                         bandwidth_trace,
                         enable_comm_delay,
+                        clock=episode_clock,
                     )
                     try:
                         state = EdgeDNNContinuousState(env_batchs[0], eval_env, assist)
@@ -449,10 +542,10 @@ def eval(
                         active_index = 0
                         active_dnn_profile: Optional[Dict[str, Any]] = None
 
-                        warmup_snapshot = state.build_snapshot(request_counter, exec_step)
+                        warmup_snapshot = _snapshot_with_clock(state, request_counter, exec_step, episode_clock)
                         assert edge_client.submit(warmup_snapshot), "failed to submit warmup VLM request"
-                        active_coarse_result = edge_client.wait_result()
-                        action_delay_ms = (time.perf_counter() - active_coarse_result.submitted_perf_time) * 1000.0
+                        active_coarse_result = _mark_result_applied(edge_client.wait_result(), episode_clock)
+                        action_delay_ms = _action_delay_ms(active_coarse_result, episode_clock)
                         state_drift_m = math.dist(active_coarse_result.observation_pose, state.current_sim_pose())
                         state.apply_edge_stop_result(
                             active_coarse_result.predict_done,
@@ -463,11 +556,11 @@ def eval(
                         while not state.dones[0] and exec_step < int(args.maxWaypoints):
                             new_result = edge_client.poll_result()
                             if new_result is not None:
-                                active_coarse_result = new_result
+                                active_coarse_result = _mark_result_applied(new_result, episode_clock)
                                 active_traj = []
                                 active_index = 0
                                 active_dnn_profile = None
-                                action_delay_ms = (time.perf_counter() - active_coarse_result.submitted_perf_time) * 1000.0
+                                action_delay_ms = _action_delay_ms(active_coarse_result, episode_clock)
                                 state_drift_m = math.dist(active_coarse_result.observation_pose, state.current_sim_pose())
                                 state.apply_edge_stop_result(
                                     active_coarse_result.predict_done,
@@ -481,11 +574,11 @@ def eval(
                                     pending_snapshot = None
 
                             if active_coarse_result is None:
-                                active_coarse_result = edge_client.wait_result()
+                                active_coarse_result = _mark_result_applied(edge_client.wait_result(), episode_clock)
                                 active_traj = []
                                 active_index = 0
                                 active_dnn_profile = None
-                                action_delay_ms = (time.perf_counter() - active_coarse_result.submitted_perf_time) * 1000.0
+                                action_delay_ms = _action_delay_ms(active_coarse_result, episode_clock)
                                 state_drift_m = math.dist(active_coarse_result.observation_pose, state.current_sim_pose())
                                 state.apply_edge_stop_result(
                                     active_coarse_result.predict_done,
@@ -514,7 +607,9 @@ def eval(
                                             pending_snapshot = None
                                         else:
                                             request_counter += 1
-                                            edge_client.submit(state.build_snapshot(request_counter, exec_step))
+                                            edge_client.submit(
+                                                _snapshot_with_clock(state, request_counter, exec_step, episode_clock)
+                                            )
                                     active_coarse_result = None
                                     active_traj = []
                                     active_index = 0
@@ -524,6 +619,8 @@ def eval(
                                     [state.episode],
                                     [active_coarse_result.coarse_goal_world],
                                 )
+                                if episode_clock.enabled:
+                                    episode_clock.advance_blocking(float(dnn_profile.get("traj_latency_ms", 0.0)))
                                 refined_current = np.asarray(refined_waypoints[0]).tolist()
                                 if not _has_executable_waypoints(refined_current):
                                     state.dones[0] = True
@@ -539,6 +636,15 @@ def eval(
                                         "legacy_body_goal_world": copy.deepcopy(
                                             active_coarse_result.legacy_body_goal_world
                                         ),
+                                        "edge_compute_latency_ms": float(active_coarse_result.edge_compute_latency_ms),
+                                        "fast_eval": bool(episode_clock.enabled),
+                                        "fast_eval_speedup": float(
+                                            episode_clock.speedup if episode_clock.enabled else 1.0
+                                        ),
+                                        "wall_elapsed_ms": float(episode_clock.wall_elapsed_ms),
+                                        "logical_elapsed_ms": float(episode_clock.now_ms),
+                                        "result_ready_logical_ms": active_coarse_result.ready_logical_ms,
+                                        "result_applied_logical_ms": active_coarse_result.applied_logical_ms,
                                         "reprojected_coarse": dnn_profile["reprojected_coarse"][0],
                                         "refined_waypoints": copy.deepcopy(refined_current),
                                         "dones": [bool(x) for x in state.dones],
@@ -560,7 +666,16 @@ def eval(
                                 continue
                             action_start = time.perf_counter()
                             eval_env.makeActionsChunk([current_chunk], target_idx=1)
-                            action_latency_ms = (time.perf_counter() - action_start) * 1000.0
+                            measured_action_wall_ms = (time.perf_counter() - action_start) * 1000.0
+                            action_times = action_timing(
+                                eval_env,
+                                measured_action_wall_ms,
+                                bool(episode_clock.enabled),
+                            )
+                            episode_clock.advance_action(
+                                action_times["action_sim_time_ms"],
+                                action_times["action_wall_time_ms"],
+                            )
                             active_index += 1
                             exec_step += 1
                             executed_since_request += 1
@@ -569,14 +684,14 @@ def eval(
                             if executed_since_request >= chunk_waypoints:
                                 if not state.dones[0]:
                                     request_counter += 1
-                                    snapshot = state.build_snapshot(request_counter, exec_step)
+                                    snapshot = _snapshot_with_clock(state, request_counter, exec_step, episode_clock)
                                     if edge_client.has_inflight():
                                         pending_snapshot = snapshot
                                     else:
                                         edge_client.submit(snapshot)
                                 executed_since_request = 0
 
-                            action_delay_ms = (time.perf_counter() - active_coarse_result.submitted_perf_time) * 1000.0
+                            action_delay_ms = _action_delay_ms(active_coarse_result, episode_clock)
                             state_drift_m = math.dist(active_coarse_result.observation_pose, state.current_sim_pose())
                             record = {
                                 "record_type": "execution",
@@ -591,13 +706,22 @@ def eval(
                                 "uplink_bandwidth_mbps": float(active_coarse_result.uplink_bandwidth_mbps),
                                 "uplink_latency_ms": float(active_coarse_result.uplink_latency_ms),
                                 "edge_llm_latency_ms": float(active_coarse_result.edge_llm_latency_ms),
+                                "edge_compute_latency_ms": float(active_coarse_result.edge_compute_latency_ms),
                                 "jetson_dnn_latency_ms": (
                                     float(active_dnn_profile["traj_latency_ms"]) if dnn_ran_this_step else None
                                 ),
-                                "airsim_action_latency_ms": float(action_latency_ms),
+                                "airsim_action_latency_ms": float(action_times["airsim_action_latency_ms"]),
+                                "action_wall_time_ms": float(action_times["action_wall_time_ms"]),
+                                "action_sim_time_ms": float(action_times["action_sim_time_ms"]),
                                 "action_delay_ms": float(action_delay_ms),
                                 "state_drift_m": float(state_drift_m),
                                 "coarse_goal_distance_m": float(coarse_goal_distance),
+                                "fast_eval": bool(episode_clock.enabled),
+                                "fast_eval_speedup": float(episode_clock.speedup if episode_clock.enabled else 1.0),
+                                "wall_elapsed_ms": float(episode_clock.wall_elapsed_ms),
+                                "logical_elapsed_ms": float(episode_clock.now_ms),
+                                "result_ready_logical_ms": active_coarse_result.ready_logical_ms,
+                                "result_applied_logical_ms": active_coarse_result.applied_logical_ms,
                                 "coarse_local": copy.deepcopy(active_coarse_result.coarse_local),
                                 "coarse_goal_world": copy.deepcopy(active_coarse_result.coarse_goal_world),
                                 "coarse_goal_world_source": active_coarse_result.coarse_goal_world_source,
@@ -638,8 +762,11 @@ def eval(
     summary = {
         "uplink_latency_ms": _metric_summary([item.get("uplink_latency_ms") for item in execution_records]),
         "edge_llm_latency_ms": _metric_summary([item.get("edge_llm_latency_ms") for item in execution_records]),
+        "edge_compute_latency_ms": _metric_summary([item.get("edge_compute_latency_ms") for item in execution_records]),
         "jetson_dnn_latency_ms": _metric_summary([item.get("jetson_dnn_latency_ms") for item in execution_records]),
         "airsim_action_latency_ms": _metric_summary([item.get("airsim_action_latency_ms") for item in execution_records]),
+        "action_wall_time_ms": _metric_summary([item.get("action_wall_time_ms") for item in execution_records]),
+        "action_sim_time_ms": _metric_summary([item.get("action_sim_time_ms") for item in execution_records]),
         "action_delay_ms": _metric_summary([item.get("action_delay_ms") for item in execution_records]),
         "state_drift_m": _metric_summary([item.get("state_drift_m") for item in execution_records]),
         "num_records": len(summary_records),
@@ -649,8 +776,9 @@ def eval(
 
 
 if __name__ == "__main__":
-    _configure_jetson_air_sim_server()
+    _configure_local_air_sim_server()
     _set_console_log_message_only()
+    configure_fast_eval_output(args, "continuous_dnn")
     eval_save_path = args.eval_save_path
     os.makedirs(eval_save_path, exist_ok=True)
     profile_log_dir = os.path.join(eval_save_path, "profile_logs")
@@ -672,7 +800,8 @@ if __name__ == "__main__":
     print("Assist setting: always_help --", args.always_help, "    use_gt --", args.use_gt)
     print(
         f"Edge DNN setting: host={args.edge_vlm_host}:{args.edge_vlm_port}, "
-        f"chunk_waypoints={args.chunk_waypoints}, enable_comm_delay={args.enable_comm_delay}"
+        f"chunk_waypoints={args.chunk_waypoints}, enable_comm_delay={args.enable_comm_delay}, "
+        f"fast_eval={args.fast_eval}, fast_eval_speedup={args.fast_eval_speedup}"
     )
 
     chunk_waypoints = max(1, int(args.chunk_waypoints))

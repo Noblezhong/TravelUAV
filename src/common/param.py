@@ -22,6 +22,8 @@ class CommonArguments:
     maxWaypoints: int = field(default=500, metadata={"help": 'max action sequence'})
     enable_comm_delay: bool = field(default=True, metadata={"help": "inject uplink delay in continuous eval"})
     comm_trace_csv_path: Optional[str] = field(default=None, metadata={"help": "bandwidth trace csv path"})
+    fast_eval: bool = field(default=False, metadata={"help": "run evaluation with original-speed logical timing"})
+    fast_eval_speedup: float = field(default=5.0, metadata={"help": "AirSim ClockSpeed used by fast evaluation"})
     chunk_waypoints: int = field(default=1, metadata={"help": "continuous eval decision interval in executed waypoints"})
     edge_vlm_host: str = field(default="127.0.0.1", metadata={"help": "edge VLM server host"})
     edge_vlm_bind_host: str = field(default="0.0.0.0", metadata={"help": "edge VLM server bind host"})
@@ -89,7 +91,10 @@ class CommonArguments:
     train_json_path: Optional[str] = field(default=None)
     object_name_json_path: Optional[str] = field(default=None)
     map_spawn_area_json_path: Optional[str] = field(default=None)
-    max_episodes_per_scene: int = field(default=5000, metadata={"help": "max episodes per scene before forced UE4 restart"})
+    max_episodes_per_scene: int = field(
+        default=100,
+        metadata={"help": "max episodes per scene before forced UE4 restart"},
+    )
     
 @dataclass
 class DataArguments:

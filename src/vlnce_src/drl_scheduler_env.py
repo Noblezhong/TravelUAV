@@ -38,6 +38,7 @@ from src.vlnce_src.hybrid_eval import (
     _point_delta,
     _write_jsonl_line,
 )
+from src.vlnce_src.fast_eval_time import FastEvalClock, FastResultTiming, action_timing
 from utils.logger import logger
 
 
@@ -66,14 +67,19 @@ class FixedBandwidthEdgePlanner:
         self,
         model_wrapper: ProfileTravelModelWrapper,
         enable_comm_delay: bool,
+        clock: Optional[FastEvalClock] = None,
     ):
         self.model_wrapper = model_wrapper
         self.enable_comm_delay = bool(enable_comm_delay)
+        self.clock = clock or FastEvalClock(False)
+        self.fast_eval = bool(self.clock.enabled)
         self._pending_job: Optional[DRLPlannerJob] = None
         self._running = False
         self._closed = False
         self._cond = threading.Condition()
         self._results: "queue.Queue[PlannerResult]" = queue.Queue()
+        self._held_result: Optional[PlannerResult] = None
+        self._edge_arrival_logical_ms: Optional[float] = None
         self._worker = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker.start()
 
@@ -81,22 +87,58 @@ class FixedBandwidthEdgePlanner:
         with self._cond:
             if self._closed:
                 return False
+            snapshot.planner_started_logical_ms = self.clock.now_ms if self.fast_eval else None
             self._pending_job = DRLPlannerJob(snapshot=copy.deepcopy(snapshot), bandwidth_bps=float(bandwidth_bps))
             self._cond.notify()
             return True
 
     def has_inflight(self) -> bool:
         with self._cond:
-            return bool(self._running or self._pending_job is not None)
+            return bool(
+                self._running
+                or self._pending_job is not None
+                or self._held_result is not None
+                or not self._results.empty()
+            )
 
     def poll_result(self) -> Optional[PlannerResult]:
-        try:
-            return self._results.get_nowait()
-        except queue.Empty:
-            return None
+        with self._cond:
+            if self._held_result is None:
+                try:
+                    self._held_result = self._results.get_nowait()
+                except queue.Empty:
+                    pass
+            while (
+                self.fast_eval
+                and self._held_result is None
+                and self._running
+                and self._edge_arrival_logical_ms is not None
+                and self.clock.now_ms >= self._edge_arrival_logical_ms
+            ):
+                self._cond.wait(timeout=0.05)
+                try:
+                    self._held_result = self._results.get_nowait()
+                except queue.Empty:
+                    pass
+            if self._held_result is None:
+                return None
+            if self.fast_eval and self._held_result.ready_logical_ms is not None and self.clock.now_ms < self._held_result.ready_logical_ms:
+                return None
+            result = self._held_result
+            self._held_result = None
+            self._edge_arrival_logical_ms = None
+            return result
 
     def wait_result(self) -> PlannerResult:
-        return self._results.get()
+        with self._cond:
+            held = self._held_result
+            self._held_result = None
+        result = held if held is not None else self._results.get()
+        if self.fast_eval:
+            self.clock.advance_to(result.ready_logical_ms)
+        with self._cond:
+            self._edge_arrival_logical_ms = None
+        return result
 
     def close(self) -> None:
         with self._cond:
@@ -129,8 +171,16 @@ class FixedBandwidthEdgePlanner:
         episodes = copy.deepcopy([snapshot.episode])
         payload_bytes, payload_bits, payload_mb = estimate_uplink_payload_bits_from_episodes(episodes)
         uplink_latency_ms = calculate_latency_ms(payload_bits, job.bandwidth_bps) if self.enable_comm_delay else 0.0
+        timing_start = snapshot.planner_started_logical_ms
+        if timing_start is None:
+            timing_start = snapshot.submitted_logical_ms
+        if self.fast_eval and timing_start is not None:
+            with self._cond:
+                self._edge_arrival_logical_ms = float(timing_start + uplink_latency_ms)
+                self._cond.notify_all()
         if uplink_latency_ms > 0:
-            time.sleep(uplink_latency_ms / 1000.0)
+            divisor = self.clock.speedup if self.fast_eval else 1.0
+            time.sleep(uplink_latency_ms / (1000.0 * divisor))
 
         inputs, rot_to_targets = self.model_wrapper.prepare_inputs(
             episodes,
@@ -143,6 +193,12 @@ class FixedBandwidthEdgePlanner:
                 episodes=episodes,
                 rot_to_targets=rot_to_targets,
             )
+        fast_timing = FastResultTiming(
+            timing_start,
+            uplink_latency_ms,
+            float(model_profile["llm_latency_ms"]),
+            float(model_profile["traj_latency_ms"]),
+        )
         return PlannerResult(
             request_id=int(snapshot.request_id),
             submitted_step=int(snapshot.submitted_step),
@@ -161,6 +217,9 @@ class FixedBandwidthEdgePlanner:
             uplink_latency_ms=float(uplink_latency_ms),
             llm_output=copy.deepcopy(model_profile["llm_output"]),
             refined_waypoints=copy.deepcopy(refined_waypoints[0]),
+            submitted_logical_ms=snapshot.submitted_logical_ms,
+            edge_arrival_logical_ms=fast_timing.edge_arrival_logical_ms,
+            ready_logical_ms=fast_timing.ready_logical_ms,
         )
 
 
@@ -209,6 +268,7 @@ class DRLSchedulerEnv(gym.Env):
         self.scheduler_step_count = 0
         self.episode_idx = -1
         self.episode_start_perf = 0.0
+        self.clock = FastEvalClock(bool(args.fast_eval), args.fast_eval_speedup)
         self.last_observed_bandwidth_bps = float(self.bandwidth_trace.next_bandwidth_bps())
         self.closed = False
         self._safety_last_threshold: Optional[float] = None
@@ -228,7 +288,8 @@ class DRLSchedulerEnv(gym.Env):
         self.episode_records = []
         self.episode_start_perf = time.perf_counter()
         self.state = ContinuousEpisodeState(self.env_batch[0], self.eval_env, self.assist, ignore_tiny_diff=True)
-        self.planner = FixedBandwidthEdgePlanner(self.model_wrapper, self.enable_comm_delay)
+        self.clock.reset()
+        self.planner = FixedBandwidthEdgePlanner(self.model_wrapper, self.enable_comm_delay, clock=self.clock)
         self.active_traj = []
         self.active_index = 0
         self.active_result = None
@@ -239,11 +300,17 @@ class DRLSchedulerEnv(gym.Env):
 
         observed_bw = self._sample_bandwidth()
         snapshot = self.state.build_snapshot(self.request_counter, self.control_step)
+        snapshot.submitted_logical_ms = self.clock.now_ms if self.clock.enabled else None
         self.request_counter += 1
         assert self.planner.submit(snapshot, observed_bw)
         wait_start = time.perf_counter()
+        wait_logical_start = self.clock.now_ms
         result = self.planner.wait_result()
-        wait_ms = (time.perf_counter() - wait_start) * 1000.0
+        wait_ms = (
+            self.clock.now_ms - wait_logical_start
+            if self.clock.enabled
+            else (time.perf_counter() - wait_start) * 1000.0
+        )
         self._apply_result(result)
         self._log_record(
             record_type="decision",
@@ -263,6 +330,7 @@ class DRLSchedulerEnv(gym.Env):
         action_id = int(action)
         self.scheduler_step_count += 1
         step_start = time.perf_counter()
+        step_logical_start = self.clock.now_ms
         observed_bw = self._sample_bandwidth()
         request_bw = None
         terminal_reason = None
@@ -295,12 +363,20 @@ class DRLSchedulerEnv(gym.Env):
             else:
                 if self.planner.has_inflight():
                     wait_start = time.perf_counter()
+                    wait_logical_start = self.clock.now_ms
                     result = self.planner.wait_result()
-                    extra["hover_wait_ms"] = float((time.perf_counter() - wait_start) * 1000.0)
+                    extra["hover_wait_ms"] = float(
+                        self.clock.now_ms - wait_logical_start
+                        if self.clock.enabled
+                        else (time.perf_counter() - wait_start) * 1000.0
+                    )
                     self._apply_result(result)
                 else:
                     if float(args.scheduler_idle_wait_ms) > 0:
-                        time.sleep(float(args.scheduler_idle_wait_ms) / 1000.0)
+                        if self.clock.enabled:
+                            self.clock.advance_blocking(float(args.scheduler_idle_wait_ms))
+                        else:
+                            time.sleep(float(args.scheduler_idle_wait_ms) / 1000.0)
                     extra["hover_wait_ms"] = float(args.scheduler_idle_wait_ms)
                     if not self.state.dones[0]:
                         request_bw = observed_bw
@@ -345,7 +421,11 @@ class DRLSchedulerEnv(gym.Env):
         extra["state_drift_delta_m"] = float(state_drift_delta_m)
         extra["time_drift_before_ms"] = float(prev_time_drift_ms)
         extra["time_drift_delta_ms"] = float(time_drift_delta_ms)
-        elapsed_ms = float((time.perf_counter() - step_start) * 1000.0)
+        elapsed_ms = (
+            float(self.clock.now_ms - step_logical_start)
+            if self.clock.enabled
+            else float((time.perf_counter() - step_start) * 1000.0)
+        )
         reward, reward_parts = self._compute_reward(
             elapsed_ms=elapsed_ms,
             ne_progress_m=ne_progress_m,
@@ -439,6 +519,8 @@ class DRLSchedulerEnv(gym.Env):
         return self.last_observed_bandwidth_bps
 
     def _apply_result(self, result: PlannerResult) -> None:
+        result.applied_logical_ms = self.clock.now_ms if self.clock.enabled else None
+        result.applied_exec_step = int(self.control_step)
         self.active_result = result
         self.active_traj = copy.deepcopy(result.refined_waypoints)
         self.active_index = 0
@@ -469,12 +551,16 @@ class DRLSchedulerEnv(gym.Env):
                 obs_start = time.perf_counter()
                 outputs = self.eval_env.get_obs()
                 obs_ms = float((time.perf_counter() - obs_start) * 1000.0)
+                self.clock.advance_blocking(obs_ms)
                 self.state.process_env_output(outputs)
+                dino_ms = 0.0
                 if not self.state.dones[0]:
-                    self.state.run_dino_and_update_metric(self.model_wrapper)
+                    dino_ms = float(self.state.run_dino_and_update_metric(self.model_wrapper))
+                    self.clock.advance_blocking(dino_ms)
                 extra["safety_dino_triggered"] = True
                 extra["safety_dino_ne_m"] = float(ne)
                 extra["safety_dino_obs_ms"] = obs_ms
+                extra["safety_dino_latency_ms"] = dino_ms
                 return
 
     def _capture_snapshot(self) -> Tuple[Optional[Snapshot], float, float]:
@@ -482,10 +568,12 @@ class DRLSchedulerEnv(gym.Env):
         obs_start = time.perf_counter()
         outputs = self.eval_env.get_obs()
         obs_latency_ms = float((time.perf_counter() - obs_start) * 1000.0)
+        self.clock.advance_blocking(obs_latency_ms)
         self.state.process_env_output(outputs)
         dino_latency_ms = 0.0
         if not self.state.dones[0]:
             dino_latency_ms = float(self.state.run_dino_and_update_metric(self.model_wrapper))
+            self.clock.advance_blocking(dino_latency_ms)
         if self.state.dones[0]:
             return None, obs_latency_ms, dino_latency_ms
         snapshot = self.state.build_snapshot(
@@ -494,6 +582,7 @@ class DRLSchedulerEnv(gym.Env):
             obs_latency_ms=obs_latency_ms,
             groundingdino_latency_ms=dino_latency_ms,
         )
+        snapshot.submitted_logical_ms = self.clock.now_ms if self.clock.enabled else None
         self.request_counter += 1
         return snapshot, obs_latency_ms, dino_latency_ms
 
@@ -509,20 +598,29 @@ class DRLSchedulerEnv(gym.Env):
     def _stop_and_request(self, bandwidth_bps: float, extra: Dict[str, Any]) -> None:
         assert self.planner is not None and self.state is not None
         wait_start = time.perf_counter()
+        wait_logical_start = self.clock.now_ms
         had_inflight = self.planner.has_inflight()
         snapshot, obs_ms, dino_ms = self._capture_snapshot()
         extra["request_obs_latency_ms"] = obs_ms
         extra["request_dino_latency_ms"] = dino_ms
         extra["stale_result_discarded"] = False
         if snapshot is None or self.state.dones[0]:
-            extra["hover_wait_ms"] = float((time.perf_counter() - wait_start) * 1000.0)
+            extra["hover_wait_ms"] = float(
+                self.clock.now_ms - wait_logical_start
+                if self.clock.enabled
+                else (time.perf_counter() - wait_start) * 1000.0
+            )
             return
         self.planner.submit(snapshot, bandwidth_bps)
         result = self._wait_for_request_result(snapshot.request_id, extra)
         self._apply_result(result)
         extra["submitted_request_id"] = int(snapshot.request_id)
         extra["had_inflight_before_stop_request"] = bool(had_inflight)
-        extra["hover_wait_ms"] = float((time.perf_counter() - wait_start) * 1000.0)
+        extra["hover_wait_ms"] = float(
+            self.clock.now_ms - wait_logical_start
+            if self.clock.enabled
+            else (time.perf_counter() - wait_start) * 1000.0
+        )
 
     def _wait_for_request_result(self, request_id: int, extra: Dict[str, Any]) -> PlannerResult:
         assert self.planner is not None
@@ -542,11 +640,16 @@ class DRLSchedulerEnv(gym.Env):
         extra["exec_target_distance_m"] = float(_point_delta(current_chunk[0], exec_pose))
         action_start = time.perf_counter()
         self.eval_env.makeActionsChunk([current_chunk], target_idx=1)
-        action_ms = float((time.perf_counter() - action_start) * 1000.0)
+        measured_wall_ms = float((time.perf_counter() - action_start) * 1000.0)
+        action_times = action_timing(self.eval_env, measured_wall_ms, self.clock.enabled)
+        self.clock.advance_action(
+            action_times["action_sim_time_ms"],
+            action_times["action_wall_time_ms"],
+        )
         self.active_index += 1
         self.control_step += 1
         self.state.sync_runtime_status_from_sim()
-        extra["airsim_action_latency_ms"] = action_ms
+        extra.update(action_times)
         extra["executed_waypoints"] = 1
 
     # ── TERMINATION ──────────────────────────────────────────────────
@@ -659,7 +762,7 @@ class DRLSchedulerEnv(gym.Env):
         return float(_active_state_drift_m(self.active_result, self.state.current_sim_pose()))
 
     def _current_time_drift_ms(self) -> float:
-        value = _active_action_delay_ms(self.active_result)
+        value = _active_action_delay_ms(self.active_result, self.clock)
         return 0.0 if value is None else float(value)
 
     def _current_ne_m(self) -> Optional[float]:
@@ -724,6 +827,11 @@ class DRLSchedulerEnv(gym.Env):
             "dones": [bool(x) for x in self.state.dones],
         }
         record.update(copy.deepcopy(extra))
+        record.update(self.clock.metadata())
+        if self.active_result is not None:
+            record["result_ready_logical_ms"] = self.active_result.ready_logical_ms
+            record["result_applied_logical_ms"] = getattr(self.active_result, "applied_logical_ms", None)
+            record["result_applied_exec_step"] = getattr(self.active_result, "applied_exec_step", None)
         _write_jsonl_line(self.profile_fp, record)
         self.summary_records.append(record)
         self.episode_records.append(record)
@@ -731,7 +839,11 @@ class DRLSchedulerEnv(gym.Env):
     def _finalize_episode(self, terminal_reason: Optional[str]) -> None:
         assert self.state is not None
         self.state.maybe_finalize(force=True)
-        episode_latency_ms = float((time.perf_counter() - self.episode_start_perf) * 1000.0)
+        episode_latency_ms = (
+            float(self.clock.now_ms)
+            if self.clock.enabled
+            else float((time.perf_counter() - self.episode_start_perf) * 1000.0)
+        )
         record = {
             "record_type": "episode_end",
             "episode_idx": int(self.episode_idx),
@@ -747,6 +859,7 @@ class DRLSchedulerEnv(gym.Env):
             "episode_latency_ms": episode_latency_ms,
             "num_episode_records": len(self.episode_records),
         }
+        record.update(self.clock.metadata())
         _write_jsonl_line(self.profile_fp, record)
         self.summary_records.append(record)
 

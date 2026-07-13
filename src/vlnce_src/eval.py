@@ -29,6 +29,11 @@ from src.vlnce_src.comm_delay import (
     estimate_uplink_payload_bits_from_outputs,
 )
 from src.vlnce_src.dino_monitor_online import DinoMonitor
+from src.vlnce_src.fast_eval_time import (
+    FastEvalClock,
+    action_timing,
+    configure_fast_eval_output,
+)
 from utils.logger import logger
 from utils.utils import *
 
@@ -80,6 +85,8 @@ def eval(
     model_wrapper.eval()
 
     summary_records = []
+    episode_latencies_ms = []
+    fast_eval = bool(args.fast_eval)
     with torch.no_grad():
         dataset = BatchIterator(eval_env)
         end_iter = len(dataset)
@@ -94,6 +101,7 @@ def eval(
                 for retry_i in range(3):
                     try:
                         batch_state = EvalBatchState(batch_size=eval_env.batch_size, env_batchs=env_batchs, env=eval_env, assist=assist)
+                        episode_clock = FastEvalClock(fast_eval, args.fast_eval_speedup)
                         pbar.update(n=eval_env.batch_size)
                         assist_notices = None
 
@@ -108,6 +116,7 @@ def eval(
                             map_names = [item["map_name"] for item in env_batchs]
 
                             step_start = time.perf_counter()
+                            step_logical_start_ms = episode_clock.now_ms
                             inputs, rot_to_targets = model_wrapper.prepare_inputs(
                                 batch_state.episodes,
                                 batch_state.target_positions,
@@ -118,31 +127,53 @@ def eval(
                                 episodes=batch_state.episodes,
                                 rot_to_targets=rot_to_targets,
                             )
+                            episode_clock.advance_blocking(
+                                float(model_profile["llm_latency_ms"]) + float(model_profile["traj_latency_ms"])
+                            )
 
                             action_start = time.perf_counter()
                             eval_env.makeActions(refined_waypoints)
                             action_end = time.perf_counter()
+                            action_times = action_timing(
+                                eval_env,
+                                (action_end - action_start) * 1000.0,
+                                fast_eval,
+                            )
+                            episode_clock.advance_action(
+                                action_times["action_sim_time_ms"],
+                                action_times["action_wall_time_ms"],
+                            )
 
                             obs_start = time.perf_counter()
                             outputs = eval_env.get_obs()
                             obs_end = time.perf_counter()
+                            obs_latency_ms = float((obs_end - obs_start) * 1000.0)
+                            episode_clock.advance_blocking(obs_latency_ms)
 
                             payload_bytes, payload_bits, payload_mb = estimate_uplink_payload_bits_from_outputs(outputs)
                             bandwidth_bps = bandwidth_trace.next_bandwidth_bps()
                             uplink_latency_ms = calculate_latency_ms(payload_bits, bandwidth_bps) if enable_comm_delay else 0.0
                             loop_without_comm_ms = float((time.perf_counter() - step_start) * 1000.0)
-                            if uplink_latency_ms > 0:
+                            if uplink_latency_ms > 0 and not fast_eval:
                                 time.sleep(uplink_latency_ms / 1000.0)
+                            if fast_eval:
+                                episode_clock.advance_blocking(uplink_latency_ms)
 
                             batch_state.update_from_env_output(outputs)
                             dino_start = time.perf_counter()
                             batch_state.predict_dones = model_wrapper.predict_done(batch_state.episodes, batch_state.object_infos)
                             dino_end = time.perf_counter()
+                            dino_latency_ms = float((dino_end - dino_start) * 1000.0)
+                            episode_clock.advance_blocking(dino_latency_ms)
                             batch_state.update_metric()
                             assist_notices = batch_state.get_assist_notices()
 
                             loop_end = time.perf_counter()
-                            loop_with_comm_ms = float((loop_end - step_start) * 1000.0)
+                            loop_with_comm_ms = (
+                                float(episode_clock.now_ms - step_logical_start_ms)
+                                if fast_eval
+                                else float((loop_end - step_start) * 1000.0)
+                            )
 
                             profile_info = {
                                 "episode_step": int(t),
@@ -151,24 +182,49 @@ def eval(
                                 "map_names": map_names,
                                 "llm_latency_ms": float(model_profile["llm_latency_ms"]),
                                 "traj_latency_ms": float(model_profile["traj_latency_ms"]),
-                                "airsim_action_latency_ms": float((action_end - action_start) * 1000.0),
-                                "obs_latency_ms": float((obs_end - obs_start) * 1000.0),
-                                "groundingdino_latency_ms": float((dino_end - dino_start) * 1000.0),
+                                "airsim_action_latency_ms": float(action_times["airsim_action_latency_ms"]),
+                                "action_wall_time_ms": float(action_times["action_wall_time_ms"]),
+                                "action_sim_time_ms": float(action_times["action_sim_time_ms"]),
+                                "obs_latency_ms": obs_latency_ms,
+                                "groundingdino_latency_ms": dino_latency_ms,
                                 "loop_latency_ms": loop_without_comm_ms,
                                 "uplink_payload_bits": int(payload_bits),
                                 "uplink_payload_mb": float(payload_mb),
                                 "uplink_bandwidth_mbps": float(bandwidth_bps / 1_000_000.0),
                                 "uplink_latency_ms": float(uplink_latency_ms),
                                 "loop_latency_with_comm_ms": loop_with_comm_ms,
+                                "decision_latency_ms": float(
+                                    obs_latency_ms
+                                    + dino_latency_ms
+                                    + uplink_latency_ms
+                                    + model_profile["llm_latency_ms"]
+                                    + model_profile["traj_latency_ms"]
+                                ),
                                 "llm_output": model_profile["llm_output"],
                                 "predict_dones": [bool(x) for x in batch_state.predict_dones],
                                 "collisions": [bool(x) for x in batch_state.collisions],
                                 "dones": [bool(x) for x in batch_state.dones],
                             }
+                            profile_info.update(episode_clock.metadata())
                             _write_jsonl_line(profile_fp, profile_info)
                             summary_records.append(profile_info)
                             _print_profile_line(t, profile_info)
+                        for batch_idx, env_batch in enumerate(env_batchs):
+                            episode_record = {
+                                "record_type": "episode_end",
+                                "seq_names": [env_batch["seq_name"]],
+                                "map_names": [env_batch["map_name"]],
+                                "control_steps": int(t),
+                                "episode_latency_ms": float(episode_clock.now_ms),
+                                "success": bool(batch_state.success[batch_idx]),
+                                "oracle_success": bool(batch_state.oracle_success[batch_idx]),
+                                "collision": bool(batch_state.collisions[batch_idx]),
+                                "final_ne_m": float(batch_state.distance_to_ends[batch_idx][-1]),
+                            }
+                            episode_record.update(episode_clock.metadata())
+                            _write_jsonl_line(profile_fp, episode_record)
                         episode_ok = True
+                        episode_latencies_ms.append(float(episode_clock.now_ms))
                         break
                     except Exception as e:
                         logger.error(f"Episode failed: {e}, retry {retry_i + 1}/3")
@@ -196,6 +252,8 @@ def eval(
         "uplink_bandwidth_mbps": _metric_summary([item["uplink_bandwidth_mbps"] for item in summary_records]),
         "uplink_latency_ms": _metric_summary([item["uplink_latency_ms"] for item in summary_records]),
         "loop_latency_with_comm_ms": _metric_summary([item["loop_latency_with_comm_ms"] for item in summary_records]),
+        "decision_latency_ms": _metric_summary([item["decision_latency_ms"] for item in summary_records]),
+        "episode_latency_ms": _metric_summary(episode_latencies_ms),
         "num_records": len(summary_records),
         "comm_delay_enabled": bool(enable_comm_delay),
     }
@@ -204,6 +262,7 @@ def eval(
 
 
 if __name__ == "__main__":
+    configure_fast_eval_output(args, "stop_and_go")
     eval_save_path = args.eval_save_path
     eval_json_path = args.eval_json_path
     dataset_path = args.dataset_path

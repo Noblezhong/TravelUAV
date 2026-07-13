@@ -108,6 +108,7 @@ class AirVLNENV:
         self.last_using_map_list = []
         self.one_scene_could_use_num = float(args.max_episodes_per_scene)
         self.this_scene_used_cnt = 0
+        self.last_action_timings = []
         self.init_VectorEnvUtil()
 
     def load_my_datasets(self):
@@ -280,7 +281,11 @@ class AirVLNENV:
             try:
                 self.machines_info = copy.deepcopy(machines_info)
                 print('machines_info:', self.machines_info)
-                self.simulator_tool = AirVLNSimulatorClientTool(machines_info=self.machines_info)
+                self.simulator_tool = AirVLNSimulatorClientTool(
+                    machines_info=self.machines_info,
+                    fast_eval=bool(args.fast_eval),
+                    fast_eval_speedup=float(args.fast_eval_speedup),
+                )
                 self.simulator_tool.run_call()
                 break
             except Exception as e:
@@ -430,10 +435,15 @@ class AirVLNENV:
             raise Exception('move on path error.')
         batch_results = []
         batch_iscollision = []
+        self.last_action_timings = []
         for index_1, item in enumerate(self.machines_info):
             for index_2, _ in enumerate(item['open_scenes']):
                 batch_results.append(results[index_1][index_2]['states'])
                 batch_iscollision.append(results[index_1][index_2]['collision'])
+                self.last_action_timings.append({
+                    'wall_time_ms': float(results[index_1][index_2].get('wall_time_ms', 0.0)),
+                    'sim_time_ms': float(results[index_1][index_2].get('sim_time_ms', 0.0)),
+                })
         # When the server returns less than 5 points (collision or environment blockage), fill it to a length of 5
         for batch_idx, batch_result in enumerate(batch_results):
             if os.environ.get('CMA_EVAL_ONLY') == '1':
@@ -484,11 +494,16 @@ class AirVLNENV:
 
         batch_results = []
         batch_iscollision = []
+        self.last_action_timings = []
         for index_1, item in enumerate(self.machines_info):
             for index_2, _ in enumerate(item['open_scenes']):
                 batch_result = results[index_1][index_2]['states']
                 batch_results.append(batch_result)
                 batch_iscollision.append(results[index_1][index_2]['collision'])
+                self.last_action_timings.append({
+                    'wall_time_ms': float(results[index_1][index_2].get('wall_time_ms', 0.0)),
+                    'sim_time_ms': float(results[index_1][index_2].get('sim_time_ms', 0.0)),
+                })
 
         for index, waypoints in enumerate(waypoints_list):
             for waypoint in waypoints:

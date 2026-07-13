@@ -240,7 +240,9 @@ def prepare_data_to_inputs(episodes, tokenizer, image_processor, data_args, targ
     input_prompt = data_args.input_prompt
     refine_prompt = data_args.refine_prompt
     sources = episodes
-    ori_sources = copy.deepcopy(sources)
+    # The episode is read-only here. Avoid copying all historical image/depth
+    # arrays; only the latest RGB and historical positions are consumed below.
+    ori_sources = sources
     processor = image_processor
     images = []
     for src in sources[::-1]:

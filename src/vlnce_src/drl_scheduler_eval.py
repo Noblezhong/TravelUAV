@@ -15,6 +15,7 @@ from src.vlnce_src.closeloop_util import BatchIterator, CheckPort, initialize_en
 from src.vlnce_src.comm_delay import BandwidthTrace, default_trace_path
 from src.vlnce_src.dino_monitor_online import DinoMonitor
 from src.vlnce_src.drl_scheduler_env import ACTION_NAMES, DRLSchedulerEnv, _as_bool, _metric_summary
+from src.vlnce_src.fast_eval_time import configure_fast_eval_output
 from utils.logger import logger
 
 
@@ -23,6 +24,7 @@ def main():
 
     if not args.scheduler_model_path:
         raise ValueError("--scheduler_model_path is required for DRL scheduler eval")
+    configure_fast_eval_output(args, "drl_based_hybrid")
     os.makedirs(args.eval_save_path, exist_ok=True)
     profile_dir = os.path.join(args.eval_save_path, "profile_logs")
     os.makedirs(profile_dir, exist_ok=True)
