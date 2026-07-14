@@ -68,6 +68,7 @@ class CommonArguments:
 
     tokenizer_use_bert: bool = field(default=True)
 
+    simulator_tool_host: str = field(default="127.0.0.1", metadata={"help": "simulator_tool host"})
     simulator_tool_port: int = field(default=30000, metadata={"help": "simulator_tool port"})
     DDP_MASTER_PORT: int = field(default=20001, metadata={"help": "DDP MASTER_PORT"})
 

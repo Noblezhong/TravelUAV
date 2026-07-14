@@ -3,7 +3,7 @@ set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 model_dir="${JETSON_MODEL_DIR:-$root_dir/Model/LLaMA-UAV}"
-dataset_path="${JETSON_DATASET_PATH:-/HDD2/TravelUAV_dataset/TravelUAV_data}"
+dataset_path="${JETSON_DATASET_PATH:-$HOME/traveluav_shared/data}"
 chunk_waypoints="${CHUNK_WAYPOINTS:-5}"
 enable_comm_delay="${ENABLE_COMM_DELAY:-True}"
 com_suffix=""
@@ -18,8 +18,9 @@ map_spawn_area_json_path="${JETSON_MAP_SPAWN_AREA_JSON_PATH:-$dataset_path/data/
 object_name_json_path="${JETSON_OBJECT_NAME_JSON_PATH:-$dataset_path/data/meta/object_description.json}"
 groundingdino_config="${JETSON_GROUNDINGDINO_CONFIG:-$root_dir/src/model_wrapper/utils/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py}"
 groundingdino_model_path="${JETSON_GROUNDINGDINO_MODEL_PATH:-$root_dir/src/model_wrapper/utils/GroundingDINO/groundingdino_swint_ogc.pth}"
-edge_vlm_host="${EDGE_VLM_HOST:-127.0.0.1}"
+edge_vlm_host="${EDGE_VLM_HOST:-192.168.105.17}"
 edge_vlm_port="${EDGE_VLM_PORT:-26000}"
+simulator_tool_host="${SIMULATOR_TOOL_HOST:-192.168.105.17}"
 simulator_tool_port="${SIMULATOR_TOOL_PORT:-25000}"
 fast_eval="${FAST_EVAL:-True}"
 fast_eval_speedup="${FAST_EVAL_SPEEDUP:-10}"
@@ -43,6 +44,7 @@ CUDA_VISIBLE_DEVICES=0 python -u "$root_dir/src/vlnce_src/edge_dnn_jetson_eval.p
     --run_type eval \
     --name EdgeDNNJetson${name_suffix} \
     --gpu_id 0 \
+    --simulator_tool_host "$simulator_tool_host" \
     --simulator_tool_port "$simulator_tool_port" \
     --DDP_MASTER_PORT 80005 \
     --batchSize 1 \

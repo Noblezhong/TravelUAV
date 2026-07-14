@@ -466,8 +466,8 @@ def _load_object_description():
         return {item["object_name"]: item["object_desc"] for item in json.load(handle)}
 
 
-def _configure_local_air_sim_server():
-    args.machines_info[0]["MACHINE_IP"] = "127.0.0.1"
+def _configure_air_sim_server():
+    args.machines_info[0]["MACHINE_IP"] = str(args.simulator_tool_host)
 
 
 def _print_episode_header(episode_idx, env_batch, chunk_waypoints):
@@ -784,7 +784,7 @@ def eval(
 
 
 if __name__ == "__main__":
-    _configure_local_air_sim_server()
+    _configure_air_sim_server()
     _set_console_log_message_only()
     configure_fast_eval_output(args, "continuous_dnn")
     eval_save_path = args.eval_save_path
