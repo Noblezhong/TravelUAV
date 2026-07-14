@@ -15,24 +15,25 @@ CUDA_VISIBLE_DEVICES=0 python -u $root_dir/src/vlnce_src/drl_scheduler_train.py 
     --always_help True \
     --use_gt True \
     --maxWaypoints 200 \
-    --max_episodes_per_scene 20 \
+    --max_episodes_per_scene 80 \
     --enable_comm_delay $enable_comm_delay \
     --comm_trace_csv_path $root_dir/bandwidth/ucc4g_bandwidth_trace.csv \
-    --scheduler_total_episodes 200 \
+    --scheduler_total_episodes 639 \
     --scheduler_total_timesteps 100000 \
     --scheduler_max_steps 800 \
+    --scheduler_gamma 0.999 \
     --scheduler_n_steps 128 \
     --scheduler_ne_norm_m 1.0 \
     --scheduler_ne_progress_weight 1.0 \
-    --scheduler_time_weight 0.2 \
-    --scheduler_drift_weight 2.0 \
+    --scheduler_time_weight 0.05 \
+    --scheduler_drift_weight 0.5 \
     --scheduler_time_drift_norm_ms 5000 \
-    --scheduler_time_drift_weight 2.0 \
-    --scheduler_request_weight 0.2 \
+    --scheduler_time_drift_weight 0.5 \
+    --scheduler_request_weight 0.0 \
     --scheduler_idle_wait_ms 500 \
     --scheduler_success_reward 40.0 \
     --scheduler_oracle_success_reward 5.0 \
-    --scheduler_illegal_action_penalty 5.0 \
+    --scheduler_illegal_action_penalty 2.0 \
     --scheduler_collision_penalty 20.0 \
     --scheduler_failure_penalty 10.0 \
     --scheduler_batch_size 32 \
