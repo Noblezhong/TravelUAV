@@ -336,14 +336,20 @@ class LatestOnlyEdgeVLMClient:
             self._has_result = False
             return result
 
-    def wait_result(self) -> EdgeCoarseResult:
+    def wait_result(self, timeout_s: float = 180.0) -> EdgeCoarseResult:
+        deadline = time.monotonic() + float(timeout_s)
         with self._condition:
             if self._error is not None:
                 raise self._error
             while not self._has_result:
                 if self._error is not None:
                     raise self._error
-                self._condition.wait(timeout=0.05)
+                if not self._inflight and self._pending_snapshot is None:
+                    raise RuntimeError("cannot wait for edge result: no request is in flight")
+                remaining_s = deadline - time.monotonic()
+                if remaining_s <= 0:
+                    raise TimeoutError(f"edge VLM request timed out after {float(timeout_s):.1f}s")
+                self._condition.wait(timeout=min(0.05, remaining_s))
             result = self._result
             self._result = None
             self._has_result = False
@@ -480,6 +486,7 @@ def _print_edge_result(episode_idx, result: EdgeCoarseResult, action_delay_ms, s
         f"uplink={result.uplink_latency_ms:.1f}ms bw={result.uplink_bandwidth_mbps:.2f}Mbps "
         f"llm={result.edge_llm_latency_ms:.1f}ms "
         f"delay={action_delay_ms:.1f}ms drift={state_drift_m:.2f}m "
+        f"predict_done={result.predict_done} target_dist={result.dino_distance_to_target_m:.2f}m "
         f"coarse={coarse_text} goal={goal_text} legacy_goal={legacy_goal_text}"
     )
 
@@ -591,11 +598,12 @@ def eval(
 
                             current_pose = state.current_sim_pose()
                             if active_coarse_result.coarse_goal_world is None:
-                                active_coarse_result = None
-                                active_traj = []
-                                active_index = 0
-                                active_dnn_profile = None
-                                continue
+                                raise RuntimeError(
+                                    "edge VLM returned no coarse goal without terminating the episode: "
+                                    f"request_id={active_coarse_result.request_id}, "
+                                    f"predict_done={active_coarse_result.predict_done}, "
+                                    f"distance_to_target_m={active_coarse_result.dino_distance_to_target_m:.2f}"
+                                )
                             coarse_goal_distance = _point_delta(active_coarse_result.coarse_goal_world, current_pose)
 
                             dnn_ran_this_step = False
