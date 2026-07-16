@@ -523,6 +523,8 @@ class AirVLNSimulatorClientTool:
         control_dt = 0.05
         arrival_radius = 0.2
         timeout_accept_radius = 0.5
+        close_settle_timeout = 1.0
+        close_progress_epsilon = 0.01
         target_timeout = 30.0
         drivetrain = airsim.DrivetrainType.ForwardOnly
         yaw_mode = airsim.YawMode(is_rate=False)
@@ -549,12 +551,52 @@ class AirVLNSimulatorClientTool:
             for target in targets[:target_limit]:
                 target_start_time = time.perf_counter()
                 target_sim_start = int(state_info['timestamp']) if self.fast_eval and state_info is not None else None
+                close_start_time = None
+                close_start_sim = None
+                close_best_distance = None
                 while True:
                     state_info = copy.deepcopy(state_sensor.retrieve())
                     imu_info = copy.deepcopy(imu_sensor.retrieve())
                     position = np.asarray(state_info['position'], dtype=np.float64)
                     delta = target - position
                     distance = float(np.linalg.norm(delta))
+
+                    if state_info.get('collision', {}).get('has_collided', False):
+                        collision = True
+                        results.append({'sensors': {'state': state_info, 'imu': imu_info}})
+                        break
+
+                    if distance <= arrival_radius:
+                        results.append({'sensors': {'state': state_info, 'imu': imu_info}})
+                        break
+
+                    if distance <= timeout_accept_radius:
+                        if close_best_distance is None or distance < close_best_distance - close_progress_epsilon:
+                            close_best_distance = distance
+                            close_start_time = time.perf_counter()
+                            close_start_sim = int(state_info['timestamp'])
+                        elif self.fast_eval and close_start_sim is not None:
+                            close_elapsed = (int(state_info['timestamp']) - close_start_sim) / 1e9
+                            if close_elapsed >= close_settle_timeout:
+                                logger.warning(
+                                    f"velocity waypoint accepted after close-range stall: distance={distance:.2f}m, "
+                                    f"settle={close_elapsed:.2f}s"
+                                )
+                                results.append({'sensors': {'state': state_info, 'imu': imu_info}})
+                                break
+                        elif not self.fast_eval and close_start_time is not None:
+                            close_elapsed = time.perf_counter() - close_start_time
+                            if close_elapsed >= close_settle_timeout:
+                                logger.warning(
+                                    f"velocity waypoint accepted after close-range stall: distance={distance:.2f}m, "
+                                    f"settle={close_elapsed:.2f}s"
+                                )
+                                results.append({'sensors': {'state': state_info, 'imu': imu_info}})
+                                break
+                    else:
+                        close_start_time = None
+                        close_start_sim = None
+                        close_best_distance = None
 
                     wall_timeout = time.perf_counter() - target_start_time > target_timeout
                     sim_timeout = (
@@ -575,15 +617,6 @@ class AirVLNSimulatorClientTool:
                             f"timeout={target_timeout:.2f}s"
                         )
                         collision = True
-                        results.append({'sensors': {'state': state_info, 'imu': imu_info}})
-                        break
-
-                    if state_info.get('collision', {}).get('has_collided', False):
-                        collision = True
-                        results.append({'sensors': {'state': state_info, 'imu': imu_info}})
-                        break
-
-                    if distance <= arrival_radius:
                         results.append({'sensors': {'state': state_info, 'imu': imu_info}})
                         break
 

@@ -26,7 +26,6 @@ from src.vlnce_src.closeloop_util import (
     is_dist_avail_and_initialized,
     save_to_dataset_eval,
     setup,
-    target_distance_increasing_for_10frames,
 )
 from src.vlnce_src.continue_eval import _as_bool, _fmt_point, _point_delta, _set_console_log_message_only
 from src.vlnce_src.continue_eval import check_collision_without_tiny_diff
@@ -128,6 +127,13 @@ def _has_executable_waypoints(refined_waypoints) -> bool:
     return True
 
 
+def _has_request_ne_regression(request_ne_history: List[float], count: int = 10) -> bool:
+    if len(request_ne_history) < count:
+        return False
+    recent = request_ne_history[-count:]
+    return all(recent[index] <= recent[index + 1] for index in range(len(recent) - 1))
+
+
 def _compact_episode_for_edge(episode: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Keep the history features but send images only for the latest frame."""
     compact = []
@@ -169,6 +175,7 @@ class EdgeDNNContinuousState:
         self.early_end = False
         self.skip_saved = False
         self.distance_to_ends: List[float] = []
+        self.request_ne_history: List[float] = []
         self.last_observation_timestamp: Optional[int] = None
         outputs = self.eval_env.reset()
         self.process_env_output(outputs)
@@ -203,9 +210,6 @@ class EdgeDNNContinuousState:
         self.dones = done_flags
         self.oracle_success = bool(oracle_success[0])
         self._append_unique_observations(observations[0])
-        if target_distance_increasing_for_10frames(self.distance_to_ends):
-            self.collisions[0] = True
-            self.dones[0] = True
 
     def refresh_observation(self) -> float:
         start = time.perf_counter()
@@ -213,6 +217,19 @@ class EdgeDNNContinuousState:
         latency_ms = (time.perf_counter() - start) * 1000.0
         self.process_env_output(outputs)
         return float(latency_ms)
+
+    def record_request_ne(self) -> None:
+        self.request_ne_history.append(self._calculate_distance_from_position(self.current_sim_pose()))
+        if _has_request_ne_regression(self.request_ne_history):
+            self.dones[0] = True
+
+    def _calculate_distance_from_position(self, position) -> float:
+        return float(
+            np.linalg.norm(
+                np.asarray(position, dtype=np.float64)
+                - np.asarray(self.target_position, dtype=np.float64)
+            )
+        )
 
     def apply_edge_stop_result(self, predict_done: bool, distance_to_target_m: float) -> None:
         self.predict_dones = [bool(predict_done)]
@@ -548,6 +565,8 @@ def eval(
                         active_traj: List[List[float]] = []
                         active_index = 0
                         active_dnn_profile: Optional[Dict[str, Any]] = None
+                        refine_observation_pending = False
+                        active_refine_obs_latency_ms = 0.0
 
                         warmup_snapshot = _snapshot_with_clock(state, request_counter, exec_step, episode_clock)
                         assert edge_client.submit(warmup_snapshot), "failed to submit warmup VLM request"
@@ -558,6 +577,8 @@ def eval(
                             active_coarse_result.predict_done,
                             active_coarse_result.dino_distance_to_target_m,
                         )
+                        if not state.dones[0]:
+                            state.record_request_ne()
                         _print_edge_result(episode_idx, active_coarse_result, action_delay_ms, state_drift_m)
 
                         while not state.dones[0] and exec_step < int(args.maxWaypoints):
@@ -567,6 +588,8 @@ def eval(
                                 active_traj = []
                                 active_index = 0
                                 active_dnn_profile = None
+                                refine_observation_pending = True
+                                active_refine_obs_latency_ms = 0.0
                                 action_delay_ms = _action_delay_ms(active_coarse_result, episode_clock)
                                 state_drift_m = math.dist(active_coarse_result.observation_pose, state.current_sim_pose())
                                 state.apply_edge_stop_result(
@@ -585,6 +608,8 @@ def eval(
                                 active_traj = []
                                 active_index = 0
                                 active_dnn_profile = None
+                                refine_observation_pending = True
+                                active_refine_obs_latency_ms = 0.0
                                 action_delay_ms = _action_delay_ms(active_coarse_result, episode_clock)
                                 state_drift_m = math.dist(active_coarse_result.observation_pose, state.current_sim_pose())
                                 state.apply_edge_stop_result(
@@ -623,6 +648,12 @@ def eval(
                                     active_index = 0
                                     active_dnn_profile = None
                                     continue
+                                if refine_observation_pending:
+                                    active_refine_obs_latency_ms = state.refresh_observation()
+                                    episode_clock.advance_blocking(active_refine_obs_latency_ms)
+                                    refine_observation_pending = False
+                                    if state.dones[0]:
+                                        break
                                 refined_waypoints, dnn_profile = model_wrapper.run_traj_from_world_goal(
                                     [state.episode],
                                     [active_coarse_result.coarse_goal_world],
@@ -688,8 +719,12 @@ def eval(
                             exec_step += 1
                             executed_since_request += 1
 
-                            state.refresh_observation()
+                            request_obs_latency_ms = 0.0
                             if executed_since_request >= chunk_waypoints:
+                                request_obs_latency_ms = state.refresh_observation()
+                                episode_clock.advance_blocking(request_obs_latency_ms)
+                                if not state.dones[0]:
+                                    state.record_request_ne()
                                 if not state.dones[0]:
                                     request_counter += 1
                                     snapshot = _snapshot_with_clock(state, request_counter, exec_step, episode_clock)
@@ -718,6 +753,10 @@ def eval(
                                 "jetson_dnn_latency_ms": (
                                     float(active_dnn_profile["traj_latency_ms"]) if dnn_ran_this_step else None
                                 ),
+                                "dnn_refine_observation_latency_ms": (
+                                    float(active_refine_obs_latency_ms) if dnn_ran_this_step else None
+                                ),
+                                "request_observation_latency_ms": float(request_obs_latency_ms),
                                 "airsim_action_latency_ms": float(action_times["airsim_action_latency_ms"]),
                                 "action_wall_time_ms": float(action_times["action_wall_time_ms"]),
                                 "action_sim_time_ms": float(action_times["action_sim_time_ms"]),
@@ -750,6 +789,22 @@ def eval(
 
                         if not state.skip_saved:
                             state.maybe_finalize(force=True)
+                        episode_record = {
+                            "record_type": "episode_end",
+                            "seq_names": [env_batchs[0]["seq_name"]],
+                            "map_names": [env_batchs[0]["map_name"]],
+                            "control_steps": int(exec_step),
+                            "episode_latency_ms": float(episode_clock.now_ms),
+                            "success": bool(state.success),
+                            "oracle_success": bool(state.oracle_success),
+                            "collision": bool(state.collisions[0]),
+                            "final_ne_m": float(
+                                state._calculate_distance_from_position(state.current_sim_pose())
+                            ),
+                        }
+                        episode_record.update(episode_clock.metadata())
+                        _write_jsonl_line(profile_fp, episode_record)
+                        summary_records.append(episode_record)
                         episode_ok = True
                         break
                     except Exception as exc:
@@ -767,7 +822,25 @@ def eval(
         pbar.close()
 
     execution_records = [item for item in summary_records if item.get("record_type") == "execution"]
+    episode_records = [item for item in summary_records if item.get("record_type") == "episode_end"]
+    decision_records = []
+    seen_requests = set()
+    for item in execution_records:
+        request_id = item.get("request_id")
+        seq_name = (item.get("seq_names") or [None])[0]
+        request_key = (seq_name, request_id)
+        if request_id is None or request_key in seen_requests:
+            continue
+        seen_requests.add(request_key)
+        decision_records.append(item)
     summary = {
+        "decision_total_latency_ms": _metric_summary(
+            [
+                float(item.get("uplink_latency_ms", 0.0))
+                + float(item.get("edge_llm_latency_ms", 0.0))
+                for item in decision_records
+            ]
+        ),
         "uplink_latency_ms": _metric_summary([item.get("uplink_latency_ms") for item in execution_records]),
         "edge_llm_latency_ms": _metric_summary([item.get("edge_llm_latency_ms") for item in execution_records]),
         "edge_compute_latency_ms": _metric_summary([item.get("edge_compute_latency_ms") for item in execution_records]),
@@ -777,6 +850,10 @@ def eval(
         "action_sim_time_ms": _metric_summary([item.get("action_sim_time_ms") for item in execution_records]),
         "action_delay_ms": _metric_summary([item.get("action_delay_ms") for item in execution_records]),
         "state_drift_m": _metric_summary([item.get("state_drift_m") for item in execution_records]),
+        "episode_latency_ms": _metric_summary([item.get("episode_latency_ms") for item in episode_records]),
+        "final_ne_m": _metric_summary([item.get("final_ne_m") for item in episode_records]),
+        "num_decision_records": len(decision_records),
+        "num_episode_records": len(episode_records),
         "num_records": len(summary_records),
     }
     with open(summary_path, "w", encoding="utf-8") as handle:

@@ -346,5 +346,4 @@ forced_fallback_count
 
 5. 评估和训练中统一使用 `time drift` 字段，不再使用 `action age` 术语。
 
-6. `scripts/hybrid_eval.sh` 属于 rule-based hybrid baseline，不是 PPO scheduler 训练入口。
-
+6. `scripts/rule_eval.sh` 属于 rule-based hybrid baseline，不是 PPO scheduler 训练入口。

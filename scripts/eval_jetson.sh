@@ -2,18 +2,9 @@
 set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-model_dir="${JETSON_MODEL_DIR:-$root_dir/Model/LLaMA-UAV}"
-dataset_path="${JETSON_DATASET_PATH:-/mnt/traveluav_data/TravelUAV_data}"
-eval_save_path="${JETSON_EVAL_SAVE_PATH:-$root_dir/eval_output_profile_jetson}"
-eval_json_path="${JETSON_EVAL_JSON_PATH:-$dataset_path/data/uav_dataset/seen_valset.json}"
-map_spawn_area_json_path="${JETSON_MAP_SPAWN_AREA_JSON_PATH:-$dataset_path/data/meta/map_spawnarea_info.json}"
-object_name_json_path="${JETSON_OBJECT_NAME_JSON_PATH:-$dataset_path/data/meta/object_description.json}"
-groundingdino_config="${JETSON_GROUNDINGDINO_CONFIG:-$root_dir/src/model_wrapper/utils/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py}"
-groundingdino_model_path="${JETSON_GROUNDINGDINO_MODEL_PATH:-$root_dir/src/model_wrapper/utils/GroundingDINO/groundingdino_swint_ogc.pth}"
+cd "$root_dir"
 
-mkdir -p "$eval_save_path"
-
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" python -u "$root_dir/src/vlnce_src/profile_eval_jetson.py" \
+CUDA_VISIBLE_DEVICES=0 python -u "$root_dir/src/vlnce_src/profile_eval_jetson.py" \
     --run_type eval \
     --name TravelLLMProfileJetson \
     --gpu_id 0 \
@@ -22,16 +13,16 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" python -u "$root_dir/src/vlnce
     --batchSize 1 \
     --always_help True \
     --use_gt True \
-    --maxWaypoints "${MAX_WAYPOINTS:-200}" \
-    --dataset_path "$dataset_path" \
-    --eval_save_path "$eval_save_path" \
-    --model_path "$model_dir/work_dirs/llama-uav-7b" \
-    --model_base "$model_dir/model_zoo/vicuna-7b-v1.5" \
-    --vision_tower "$model_dir/model_zoo/LAVIS/eva_vit_g.pth" \
-    --image_processor "$model_dir/llamavid/processor/clip-patch14-224" \
-    --traj_model_path "$model_dir/work_dirs/traveluav-traj-model" \
-    --eval_json_path "$eval_json_path" \
-    --map_spawn_area_json_path "$map_spawn_area_json_path" \
-    --object_name_json_path "$object_name_json_path" \
-    --groundingdino_config "$groundingdino_config" \
-    --groundingdino_model_path "$groundingdino_model_path"
+    --maxWaypoints 200 \
+    --dataset_path /home/zt/traveluav_shared/data \
+    --eval_save_path "$root_dir/eval_output_profile_jetson" \
+    --model_path "$root_dir/Model/LLaMA-UAV/work_dirs/llama-uav-7b" \
+    --model_base "$root_dir/Model/LLaMA-UAV/model_zoo/vicuna-7b-v1.5" \
+    --vision_tower "$root_dir/Model/LLaMA-UAV/model_zoo/LAVIS/eva_vit_g.pth" \
+    --image_processor "$root_dir/Model/LLaMA-UAV/llamavid/processor/clip-patch14-224" \
+    --traj_model_path "$root_dir/Model/LLaMA-UAV/work_dirs/traveluav-traj-model" \
+    --eval_json_path /home/zt/traveluav_shared/data/data/uav_dataset/seen_valset.json \
+    --map_spawn_area_json_path /home/zt/traveluav_shared/data/data/meta/map_spawnarea_info.json \
+    --object_name_json_path /home/zt/traveluav_shared/data/data/meta/object_description.json \
+    --groundingdino_config "$root_dir/src/model_wrapper/utils/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py" \
+    --groundingdino_model_path "$root_dir/src/model_wrapper/utils/GroundingDINO/groundingdino_swint_ogc.pth"

@@ -1,7 +1,6 @@
 #!/bin/bash
 
 root_dir=.
-model_dir=$root_dir/Model/LLaMA-UAV
 enable_comm_delay=True
 run_ts=$(date +%m%d-%H%M)
 
@@ -40,11 +39,11 @@ CUDA_VISIBLE_DEVICES=0 python -u $root_dir/src/vlnce_src/drl_scheduler_train.py 
     --scheduler_learning_rate 0.0003 \
     --dataset_path /HDD2/TravelUAV_dataset/TravelUAV_data/ \
     --eval_save_path /code/TravelUAV/drl_train_$run_ts \
-    --model_path $model_dir/work_dirs/llama-uav-7b \
-    --model_base $model_dir/model_zoo/vicuna-7b-v1.5 \
-    --vision_tower $model_dir/model_zoo/LAVIS/eva_vit_g.pth \
-    --image_processor $model_dir/llamavid/processor/clip-patch14-224 \
-    --traj_model_path $model_dir/work_dirs/traveluav-traj-model \
+    --model_path "$root_dir/Model/LLaMA-UAV/work_dirs/llama-uav-7b" \
+    --model_base "$root_dir/Model/LLaMA-UAV/model_zoo/vicuna-7b-v1.5" \
+    --vision_tower "$root_dir/Model/LLaMA-UAV/model_zoo/LAVIS/eva_vit_g.pth" \
+    --image_processor "$root_dir/Model/LLaMA-UAV/llamavid/processor/clip-patch14-224" \
+    --traj_model_path "$root_dir/Model/LLaMA-UAV/work_dirs/traveluav-traj-model" \
     --eval_json_path /code/TravelUAV/drl_scheduler_seen_curriculum.json \
     --map_spawn_area_json_path /HDD2/TravelUAV_dataset/TravelUAV_data/data/meta/map_spawnarea_info.json \
     --object_name_json_path /HDD2/TravelUAV_dataset/TravelUAV_data/data/meta/object_description.json \

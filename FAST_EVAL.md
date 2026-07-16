@@ -18,7 +18,7 @@ Run an evaluator with the default 5x speed:
 ```bash
 bash scripts/eval.sh --fast_eval True
 bash scripts/continue_eval.sh --fast_eval True
-bash scripts/hybrid_eval.sh --fast_eval True
+bash scripts/rule_eval.sh --fast_eval True
 bash scripts/drl_scheduler_eval.sh /path/to/ppo_scheduler.zip --fast_eval True
 ```
 
