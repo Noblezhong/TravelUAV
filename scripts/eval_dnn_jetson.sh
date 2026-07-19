@@ -1,8 +1,10 @@
 #!/bin/bash
 
+RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
+
 PYTHONPATH=/home/zt/code/TravelUAV CUDA_VISIBLE_DEVICES=0 python -u /home/zt/code/TravelUAV/src/vlnce_src/edge_dnn_jetson_eval.py \
     --run_type eval \
-    --name EdgeDNNJetsonCom \
+    --name TrajCorrV2 \
     --gpu_id 0 \
     --simulator_tool_host 192.168.105.17 \
     --simulator_tool_port 25000 \
@@ -20,7 +22,7 @@ PYTHONPATH=/home/zt/code/TravelUAV CUDA_VISIBLE_DEVICES=0 python -u /home/zt/cod
     --max_episodes_per_scene 100 \
     --comm_trace_csv_path /home/zt/code/TravelUAV/bandwidth/ucc4g_bandwidth_trace.csv \
     --dataset_path /home/zt/traveluav_shared/data \
-    --eval_save_path /home/zt/code/TravelUAV/eval_dnn_com_v1 \
+    --eval_save_path "/home/zt/code/TravelUAV/eval_trajcorr_v2_${RUN_ID}" \
     --model_path /home/zt/code/TravelUAV/Model/LLaMA-UAV/work_dirs/llama-uav-7b \
     --model_base /home/zt/code/TravelUAV/Model/LLaMA-UAV/model_zoo/vicuna-7b-v1.5 \
     --vision_tower /home/zt/code/TravelUAV/Model/LLaMA-UAV/model_zoo/LAVIS/eva_vit_g.pth \

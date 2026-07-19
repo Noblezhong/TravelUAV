@@ -654,9 +654,16 @@ def eval(
                                     refine_observation_pending = False
                                     if state.dones[0]:
                                         break
-                                refined_waypoints, dnn_profile = model_wrapper.run_traj_from_world_goal(
+                                if active_coarse_result.coarse_local is None:
+                                    raise RuntimeError(
+                                        "edge VLM returned no coarse vector without terminating the episode: "
+                                        f"request_id={active_coarse_result.request_id}"
+                                    )
+                                refined_waypoints, dnn_profile = model_wrapper.run_trajcorr_from_world_goal(
                                     [state.episode],
                                     [active_coarse_result.coarse_goal_world],
+                                    [active_coarse_result.coarse_local],
+                                    [active_coarse_result.observation_pose],
                                 )
                                 if episode_clock.enabled:
                                     episode_clock.advance_blocking(float(dnn_profile.get("traj_latency_ms", 0.0)))
@@ -685,6 +692,9 @@ def eval(
                                         "result_ready_logical_ms": active_coarse_result.ready_logical_ms,
                                         "result_applied_logical_ms": active_coarse_result.applied_logical_ms,
                                         "reprojected_coarse": dnn_profile["reprojected_coarse"][0],
+                                        "trajcorr_goal_world": dnn_profile["trajcorr_goal_world"][0],
+                                        "original_coarse_norm_m": float(dnn_profile["original_coarse_norm_m"][0]),
+                                        "trajcorr_coarse_norm_m": float(dnn_profile["trajcorr_coarse_norm_m"][0]),
                                         "refined_waypoints": copy.deepcopy(refined_current),
                                         "dones": [bool(x) for x in state.dones],
                                         "collisions": [bool(x) for x in state.collisions],
@@ -703,10 +713,6 @@ def eval(
                                 active_coarse_result = None
                                 active_dnn_profile = None
                                 continue
-                            executed_waypoint = copy.deepcopy(current_chunk[0])
-                            pre_action_pose = state.current_sim_pose()
-                            buffer_waypoint_index = int(active_index)
-                            buffer_waypoint_count = int(len(active_traj))
                             action_start = time.perf_counter()
                             eval_env.makeActionsChunk([current_chunk], target_idx=1)
                             measured_action_wall_ms = (time.perf_counter() - action_start) * 1000.0
@@ -722,9 +728,6 @@ def eval(
                             active_index += 1
                             exec_step += 1
                             executed_since_request += 1
-                            post_action_pose = state.current_sim_pose()
-                            executed_waypoint_error_m = _point_delta(executed_waypoint, post_action_pose)
-                            post_action_ne_m = state._calculate_distance_from_position(post_action_pose)
 
                             request_obs_latency_ms = 0.0
                             if executed_since_request >= chunk_waypoints:
@@ -781,14 +784,10 @@ def eval(
                                 "coarse_goal_world_source": active_coarse_result.coarse_goal_world_source,
                                 "legacy_body_goal_world": copy.deepcopy(active_coarse_result.legacy_body_goal_world),
                                 "reprojected_coarse": copy.deepcopy(active_dnn_profile["reprojected_coarse"][0]),
+                                "trajcorr_goal_world": copy.deepcopy(active_dnn_profile["trajcorr_goal_world"][0]),
+                                "original_coarse_norm_m": float(active_dnn_profile["original_coarse_norm_m"][0]),
+                                "trajcorr_coarse_norm_m": float(active_dnn_profile["trajcorr_coarse_norm_m"][0]),
                                 "refined_waypoints": copy.deepcopy(active_traj),
-                                "executed_waypoint": executed_waypoint,
-                                "buffer_waypoint_index": buffer_waypoint_index,
-                                "buffer_waypoint_count": buffer_waypoint_count,
-                                "pre_action_pose": pre_action_pose,
-                                "post_action_pose": post_action_pose,
-                                "executed_waypoint_error_m": float(executed_waypoint_error_m),
-                                "post_action_ne_m": float(post_action_ne_m),
                                 "success": bool(state.success),
                                 "collision": bool(state.collisions[0]),
                                 "done": bool(state.dones[0]),
