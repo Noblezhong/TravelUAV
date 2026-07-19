@@ -1,6 +1,6 @@
 #!/bin/bash
 
-RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
+RUN_ID="${RUN_ID:-$(date +%m%d-%H%M)}"
 
 PYTHONPATH=/home/zt/code/TravelUAV CUDA_VISIBLE_DEVICES=0 python -u /home/zt/code/TravelUAV/src/vlnce_src/edge_dnn_jetson_eval.py \
     --run_type eval \
