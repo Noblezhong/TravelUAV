@@ -703,6 +703,10 @@ def eval(
                                 active_coarse_result = None
                                 active_dnn_profile = None
                                 continue
+                            executed_waypoint = copy.deepcopy(current_chunk[0])
+                            pre_action_pose = state.current_sim_pose()
+                            buffer_waypoint_index = int(active_index)
+                            buffer_waypoint_count = int(len(active_traj))
                             action_start = time.perf_counter()
                             eval_env.makeActionsChunk([current_chunk], target_idx=1)
                             measured_action_wall_ms = (time.perf_counter() - action_start) * 1000.0
@@ -718,6 +722,9 @@ def eval(
                             active_index += 1
                             exec_step += 1
                             executed_since_request += 1
+                            post_action_pose = state.current_sim_pose()
+                            executed_waypoint_error_m = _point_delta(executed_waypoint, post_action_pose)
+                            post_action_ne_m = state._calculate_distance_from_position(post_action_pose)
 
                             request_obs_latency_ms = 0.0
                             if executed_since_request >= chunk_waypoints:
@@ -775,7 +782,13 @@ def eval(
                                 "legacy_body_goal_world": copy.deepcopy(active_coarse_result.legacy_body_goal_world),
                                 "reprojected_coarse": copy.deepcopy(active_dnn_profile["reprojected_coarse"][0]),
                                 "refined_waypoints": copy.deepcopy(active_traj),
-                                "executed_waypoint": copy.deepcopy(current_chunk[0]),
+                                "executed_waypoint": executed_waypoint,
+                                "buffer_waypoint_index": buffer_waypoint_index,
+                                "buffer_waypoint_count": buffer_waypoint_count,
+                                "pre_action_pose": pre_action_pose,
+                                "post_action_pose": post_action_pose,
+                                "executed_waypoint_error_m": float(executed_waypoint_error_m),
+                                "post_action_ne_m": float(post_action_ne_m),
                                 "success": bool(state.success),
                                 "collision": bool(state.collisions[0]),
                                 "done": bool(state.dones[0]),
