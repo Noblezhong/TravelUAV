@@ -250,7 +250,7 @@ class DRLSchedulerEnv(gym.Env):
         self.max_waypoints = int(max_waypoints or args.maxWaypoints)
         self.deterministic_eval = bool(deterministic_eval)
         self.action_space = spaces.Discrete(4)
-        self.observation_space = spaces.Box(low=-10.0, high=10.0, shape=(6,), dtype=np.float32)
+        self.observation_space = spaces.Box(low=-10.0, high=10.0, shape=(7,), dtype=np.float32)
 
         os.makedirs(os.path.dirname(self.profile_log_path), exist_ok=True)
         self.profile_fp = open(self.profile_log_path, "w", encoding="utf-8")
@@ -361,27 +361,18 @@ class DRLSchedulerEnv(gym.Env):
                 request_bw = observed_bw
                 self._stop_and_request(observed_bw, extra)
             else:
-                if self.planner.has_inflight():
-                    wait_start = time.perf_counter()
-                    wait_logical_start = self.clock.now_ms
-                    result = self.planner.wait_result()
-                    extra["hover_wait_ms"] = float(
-                        self.clock.now_ms - wait_logical_start
-                        if self.clock.enabled
-                        else (time.perf_counter() - wait_start) * 1000.0
-                    )
-                    self._apply_result(result)
-                else:
-                    if float(args.scheduler_idle_wait_ms) > 0:
-                        if self.clock.enabled:
-                            self.clock.advance_blocking(float(args.scheduler_idle_wait_ms))
-                        else:
-                            time.sleep(float(args.scheduler_idle_wait_ms) / 1000.0)
-                    extra["hover_wait_ms"] = float(args.scheduler_idle_wait_ms)
-                    if not self.state.dones[0]:
-                        request_bw = observed_bw
-                        extra["stop_no_request_fallback"] = "idle_then_request"
-                        self._stop_and_request(observed_bw, extra)
+                # STOP_NO_REQUEST: _check_action_legal guarantees inflight exists.
+                # (If inflight were absent the action would be illegal and
+                # overridden to STOP_REQUEST above.)
+                wait_start = time.perf_counter()
+                wait_logical_start = self.clock.now_ms
+                result = self.planner.wait_result()
+                extra["hover_wait_ms"] = float(
+                    self.clock.now_ms - wait_logical_start
+                    if self.clock.enabled
+                    else (time.perf_counter() - wait_start) * 1000.0
+                )
+                self._apply_result(result)
         else:
             if self._buffer_remaining() <= 0:
                 request_bw = observed_bw
@@ -724,6 +715,8 @@ class DRLSchedulerEnv(gym.Env):
         if observed_bandwidth_bps is None:
             observed_bandwidth_bps = self.last_observed_bandwidth_bps
         next_distance = self._next_waypoint_distance_m()
+        cur_ne = self._current_ne_m()
+        ne_norm = float(getattr(args, "scheduler_ne_state_norm_m", None) or 100.0)
         obs = np.asarray(
             [
                 float(self._buffer_remaining()) / BUFFER_REMAINING_NORM,
@@ -732,6 +725,7 @@ class DRLSchedulerEnv(gym.Env):
                 1.0 if self.planner is not None and self.planner.has_inflight() else 0.0,
                 self._current_drift_m() / float(args.scheduler_drift_norm_m or STATE_DRIFT_NORM_M),
                 self._current_time_drift_ms() / float(args.scheduler_time_drift_norm_ms or TIME_DRIFT_NORM_MS),
+                (cur_ne / ne_norm) if cur_ne is not None else 10.0,  # Critic-only: NE
             ],
             dtype=np.float32,
         )

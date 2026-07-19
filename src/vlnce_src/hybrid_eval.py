@@ -665,7 +665,7 @@ class ContinuousEpisodeState:
         dino_latency_ms = (time.perf_counter() - dino_start) * 1000.0
         if not self.dones[0] and self.predict_dones[0]:
             current_distance = self.distance_to_ends[-1]
-            if current_distance <= 20 and not self.early_end:
+            if current_distance <= 20:
                 self.success = True
                 self.dones[0] = True
             elif current_distance > 20:

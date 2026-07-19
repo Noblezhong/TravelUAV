@@ -41,6 +41,7 @@ class CommonArguments:
     scheduler_drift_norm_m: float = field(default=2.5, metadata={"help": "reward normalization delta0 for scheduler state drift"})
     scheduler_time_drift_norm_ms: float = field(default=5000.0, metadata={"help": "reward normalization tau0 for scheduler time drift increase"})
     scheduler_ne_norm_m: float = field(default=1.0, metadata={"help": "reward normalization NE0 for navigation error progress"})
+    scheduler_ne_state_norm_m: float = field(default=100.0, metadata={"help": "state normalization for NE (Critic-only dimension)"})
     scheduler_ne_progress_weight: float = field(default=1.0, metadata={"help": "reward weight for navigation error progress"})
     scheduler_time_weight: float = field(default=1.0, metadata={"help": "reward weight for scheduler elapsed time"})
     scheduler_drift_weight: float = field(default=1.0, metadata={"help": "reward weight for scheduler state drift increase"})

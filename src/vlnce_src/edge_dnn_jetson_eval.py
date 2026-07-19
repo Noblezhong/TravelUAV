@@ -234,7 +234,7 @@ class EdgeDNNContinuousState:
     def apply_edge_stop_result(self, predict_done: bool, distance_to_target_m: float) -> None:
         self.predict_dones = [bool(predict_done)]
         if not self.dones[0] and predict_done:
-            if distance_to_target_m <= 20 and not self.early_end:
+            if distance_to_target_m <= 20:
                 self.success = True
                 self.dones[0] = True
             elif distance_to_target_m > 20:

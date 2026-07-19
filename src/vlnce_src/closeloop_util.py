@@ -299,7 +299,7 @@ class EvalBatchState:
             if self.dones[i]:
                 continue
             if self.predict_dones[i] and not self.skips[i]:
-                if self.distance_to_ends[i][-1] <= 20 and not self.early_end[i]:
+                if self.distance_to_ends[i][-1] <= 20:
                     self.success[i] = True
                     self.dones[i] = True
                 elif self.distance_to_ends[i][-1] > 20:
