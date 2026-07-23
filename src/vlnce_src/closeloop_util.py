@@ -10,6 +10,10 @@ from utils.utils import *
 from src.common.param import args
 import torch.backends.cudnn as cudnn
 from src.vlnce_src.env_uav import AirVLNENV, RGB_FOLDER, DEPTH_FOLDER
+from src.vlnce_src.eval_contract import (
+    check_collision_without_tiny_diff,
+    mark_ne_regression_failure,
+)
 
 
 def setup(dagger_it=0, manual_init_distributed_mode=False):
@@ -231,10 +235,18 @@ class DaggerBatchState:
                     
                     
 class EvalBatchState:
-    def __init__(self, batch_size, env_batchs, env, assist):
+    def __init__(
+        self,
+        batch_size,
+        env_batchs,
+        env,
+        assist,
+        ignore_tiny_diff=False,
+    ):
         self.batch_size = batch_size
         self.eval_env = env
         self.assist = assist
+        self.ignore_tiny_diff = bool(ignore_tiny_diff)
         self.episodes = [[] for _ in range(batch_size)]
         self.target_positions = [b['object_position'] for b in env_batchs]
         self.object_infos = [self._get_object_info(b) for b in env_batchs]
@@ -275,7 +287,20 @@ class EvalBatchState:
 
     def update_from_env_output(self, outputs):
         observations, self.dones, self.collisions, self.oracle_success = [list(x) for x in zip(*outputs)]
-        self.collisions, self.dones = self.assist.check_collision_by_depth(self.episodes, observations, self.collisions, self.dones)
+        if self.ignore_tiny_diff:
+            self.collisions, self.dones = check_collision_without_tiny_diff(
+                self.episodes,
+                observations,
+                self.collisions,
+                self.dones,
+            )
+        else:
+            self.collisions, self.dones = self.assist.check_collision_by_depth(
+                self.episodes,
+                observations,
+                self.collisions,
+                self.dones,
+            )
         
         for i in range(self.batch_size):
             if i in self.envs_to_pause:
@@ -284,12 +309,11 @@ class EvalBatchState:
                 self.episodes[i].append(observations[i][j])
             self.distance_to_ends[i].append(self._calculate_distance(observations[i][-1], self.target_positions[i]))
             if target_distance_increasing_for_10frames(self.distance_to_ends[i]):
-                # CMA: early stop but don't count as collision (no physical collision in teleport)
-                if os.environ.get('CMA_EVAL_ONLY') == '1':
-                    self.dones[i] = True
-                else:
-                    self.collisions[i] = True
-                    self.dones[i] = True
+                self.collisions, self.dones = mark_ne_regression_failure(
+                    self.collisions,
+                    self.dones,
+                    i,
+                )
 
     def get_assist_notices(self):
         return self.assist.get_assist_notice(self.episodes, self.trajs, self.object_infos, self.target_positions)

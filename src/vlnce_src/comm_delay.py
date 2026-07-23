@@ -1,4 +1,5 @@
 import csv
+import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -44,6 +45,13 @@ class BandwidthTrace:
         elif self.cycle:
             self._index = 0
         return value
+
+    def reset(self, index=0):
+        self._index = int(index) % self.sample_count
+
+    def reset_for_episode(self, seq_name):
+        digest = hashlib.sha256(str(seq_name).encode("utf-8")).hexdigest()
+        self.reset(int(digest[:8], 16))
 
 
 def calculate_latency_ms(payload_bits, bandwidth_bps):

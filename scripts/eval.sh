@@ -1,6 +1,7 @@
 #!/bin/bash
 
 root_dir=.
+RUN_ID="${RUN_ID:-$(date +%m%d-%H%M)}"
 
 CUDA_VISIBLE_DEVICES=0 python -u "$root_dir/src/vlnce_src/eval.py" \
     --run_type eval \
@@ -13,9 +14,12 @@ CUDA_VISIBLE_DEVICES=0 python -u "$root_dir/src/vlnce_src/eval.py" \
     --use_gt True \
     --maxWaypoints 200 \
     --enable_comm_delay True \
+    --fast_eval True \
+    --fast_eval_speedup 10 \
+    --max_episodes_per_scene 100 \
     --comm_trace_csv_path "$root_dir/bandwidth/ucc4g_bandwidth_trace.csv" \
     --dataset_path /HDD2/TravelUAV_dataset/TravelUAV_data/ \
-    --eval_save_path /HDD1/code/TravelUAV/eval_output_com \
+    --eval_save_path "/HDD1/code/TravelUAV/eval_stop_go_${RUN_ID}" \
     --model_path "$root_dir/Model/LLaMA-UAV/work_dirs/llama-uav-7b" \
     --model_base "$root_dir/Model/LLaMA-UAV/model_zoo/vicuna-7b-v1.5" \
     --vision_tower "$root_dir/Model/LLaMA-UAV/model_zoo/LAVIS/eva_vit_g.pth" \

@@ -40,6 +40,7 @@ from src.vlnce_src.fast_eval_time import (
     action_timing,
     configure_fast_eval_output,
 )
+from src.vlnce_src.eval_contract import check_collision_without_tiny_diff
 from env_uav import AirVLNENV
 from utils.logger import logger
 from utils.utils import *
@@ -110,29 +111,6 @@ def _set_console_log_message_only():
     for handler in logger.handlers:
         if isinstance(handler, logging.StreamHandler):
             handler.setFormatter(plain_formatter)
-
-
-def check_collision_without_tiny_diff(episodes, current_observations, collisions, dones):
-    for i, prev_episode in enumerate(episodes):
-        if collisions[i]:
-            if not dones[i]:
-                dones[i] = True
-            continue
-        if len(prev_episode) == 0:
-            continue
-
-        close_collision = False
-        current_episode = current_observations[i]
-        for cid in range(len(current_episode[-1]["depth"])):
-            zero_cnt = (current_episode[-1]["depth"][cid] <= 1).sum()
-            if zero_cnt > 0.1 * current_episode[-1]["depth"][cid].size:
-                close_collision = True
-                break
-
-        collisions[i] = close_collision
-        if collisions[i] and not dones[i]:
-            dones[i] = True
-    return collisions, dones
 
 
 def _print_episode_header(episode_idx, env_batch, chunk_waypoints):

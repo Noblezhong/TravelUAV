@@ -17,10 +17,10 @@ def build_trajcorr_target(
     current_rotation,
     coarse_goal_world,
     coarse_local,
-    observation_pose,
+    observation_pose=None,
     epsilon: float = 1e-6,
 ):
-    """Keep the old coarse step length while aiming toward its world-goal bearing."""
+    """Build a training-scale target along the stale world's current bearing."""
     current = np.asarray(current_pose, dtype=np.float64).reshape(3)
     rotation = np.asarray(current_rotation, dtype=np.float64).reshape(3, 3)
     old_goal = np.asarray(coarse_goal_world, dtype=np.float64).reshape(3)
@@ -30,16 +30,27 @@ def build_trajcorr_target(
         raise ValueError("cannot build TrajCorr target from a zero-length coarse vector")
 
     direction_world = old_goal - current
-    if np.linalg.norm(direction_world) <= epsilon:
-        direction_world = old_goal - np.asarray(observation_pose, dtype=np.float64).reshape(3)
     direction_norm = float(np.linalg.norm(direction_world))
+    if observation_pose is not None:
+        original_world_direction = old_goal - np.asarray(
+            observation_pose,
+            dtype=np.float64,
+        ).reshape(3)
+        original_world_norm = float(np.linalg.norm(original_world_direction))
+        if original_world_norm > epsilon:
+            original_world_unit = original_world_direction / original_world_norm
+            remaining_forward_m = float(np.dot(direction_world, original_world_unit))
+            if remaining_forward_m <= epsilon:
+                direction_world = original_world_unit
+                direction_norm = 1.0
     if direction_norm <= epsilon:
         raise ValueError("cannot build TrajCorr target from a zero-length world direction")
 
-    trajcorr_goal_world = current + direction_world / direction_norm * original_norm_m
-    local_target = rotation.T @ (trajcorr_goal_world - current)
+    direction_unit = direction_world / direction_norm
+    virtual_goal_world = current + direction_unit * original_norm_m
+    local_target = rotation.T @ (virtual_goal_world - current)
     return {
-        "trajcorr_goal_world": trajcorr_goal_world,
+        "virtual_goal_world": virtual_goal_world,
         "local_target": local_target,
         "original_coarse_norm_m": original_norm_m,
         "trajcorr_coarse_norm_m": float(np.linalg.norm(local_target)),
@@ -110,20 +121,35 @@ class EdgeDNNModelWrapper(BaseModelWrapper):
             targets.append(target)
             local_targets.append(target["local_target"])
 
-        refined_waypoints, profile = self.run_traj_from_local_targets(
-            episodes,
-            np.asarray(local_targets, dtype=np.float64),
+        local_waypoints, profile = self._infer_local_waypoints(
+            episodes, np.asarray(local_targets, dtype=np.float64)
         )
+        refined_waypoints = transform_to_world(local_waypoints, episodes)
+        p5_errors = []
+        for index, target in enumerate(targets):
+            if len(refined_waypoints[index]) >= 5:
+                p5_errors.append(
+                    float(np.linalg.norm(refined_waypoints[index][4] - target["virtual_goal_world"]))
+                )
+            else:
+                p5_errors.append(None)
         profile.update(
             {
-                "trajcorr_goal_world": [target["trajcorr_goal_world"].tolist() for target in targets],
+                "virtual_goal_world": [target["virtual_goal_world"].tolist() for target in targets],
                 "original_coarse_norm_m": [target["original_coarse_norm_m"] for target in targets],
                 "trajcorr_coarse_norm_m": [target["trajcorr_coarse_norm_m"] for target in targets],
+                "trajectory_scale": [1.0 for _ in targets],
+                "p5_to_virtual_goal_m": p5_errors,
             }
         )
         return refined_waypoints, profile
 
     def run_traj_from_local_targets(self, episodes, local_targets):
+        local_waypoints, profile = self._infer_local_waypoints(episodes, local_targets)
+        refined_waypoints = transform_to_world(local_waypoints, episodes)
+        return refined_waypoints, profile
+
+    def _infer_local_waypoints(self, episodes, local_targets):
         image_list = []
         for episode in episodes:
             image_list.append(episode[-1]["rgb"][0])
@@ -139,9 +165,8 @@ class EdgeDNNModelWrapper(BaseModelWrapper):
             waypoints_traj = self.traj_model(inputs, None)
             self._sync_cuda()
             traj_latency_ms = (time.perf_counter() - start) * 1000.0
-        refined_waypoints = waypoints_traj.detach().cpu().to(dtype=torch.float32).numpy()
-        refined_waypoints = transform_to_world(refined_waypoints, episodes)
-        return refined_waypoints, {
+        local_waypoints = waypoints_traj.detach().cpu().to(dtype=torch.float32).numpy()
+        return local_waypoints, {
             "traj_latency_ms": float(traj_latency_ms),
             "reprojected_coarse": np.asarray(local_targets).tolist(),
         }

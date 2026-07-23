@@ -15,6 +15,7 @@ from typing import Dict, List, Optional
 import tqdm
 from src.common.param import args
 from utils.logger import logger
+from src.vlnce_src.eval_contract import stop_executed_waypoints
 sys.path.append(str(Path(str(os.getcwd())).resolve()))
 from airsim_plugin.AirVLNSimulatorClientTool import AirVLNSimulatorClientTool
 from utils.env_utils_uav import SimState
@@ -460,7 +461,7 @@ class AirVLNENV:
                 batch_result.extend([copy.deepcopy(self.sim_states[batch_idx].trajectory[-1]) for i in range(5)])
                 batch_iscollision[batch_idx] = True
         for index, waypoints in enumerate(waypoints_list):
-            for waypoint in waypoints: # check stop
+            for waypoint in stop_executed_waypoints(waypoints): # check stop
                 if np.linalg.norm(np.array(waypoint[0:3]) - np.array(self.batch[index]['object_position'])) < self.sim_states[index].SUCCESS_DISTANCE:
                     self.sim_states[index].oracle_success = True
                 elif self.sim_states[index].step >= int(args.maxWaypoints):
@@ -509,7 +510,7 @@ class AirVLNENV:
             for waypoint in waypoints:
                 if np.linalg.norm(np.array(waypoint[0:3]) - np.array(self.batch[index]['object_position'])) < self.sim_states[index].SUCCESS_DISTANCE:
                     self.sim_states[index].oracle_success = True
-                elif self.sim_states[index].step >= int(args.maxWaypoints):
+                elif self.sim_states[index].step >= int(args.max_control_steps):
                     self.sim_states[index].is_end = True
             if self.sim_states[index].is_end == True:
                 waypoints = [self.sim_states[index].pose[0:3]] * len(waypoints)

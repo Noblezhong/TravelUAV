@@ -34,6 +34,7 @@ from src.vlnce_src.fast_eval_time import (
     action_timing,
     configure_fast_eval_output,
 )
+from src.vlnce_src.eval_contract import stop_executed_waypoint_count
 from utils.logger import logger
 from utils.utils import *
 
@@ -85,6 +86,7 @@ def eval(
     model_wrapper.eval()
 
     summary_records = []
+    episode_records = []
     episode_latencies_ms = []
     fast_eval = bool(args.fast_eval)
     with torch.no_grad():
@@ -100,7 +102,15 @@ def eval(
                 episode_ok = False
                 for retry_i in range(3):
                     try:
-                        batch_state = EvalBatchState(batch_size=eval_env.batch_size, env_batchs=env_batchs, env=eval_env, assist=assist)
+                        for env_batch in env_batchs:
+                            bandwidth_trace.reset_for_episode(env_batch["seq_name"])
+                        batch_state = EvalBatchState(
+                            batch_size=eval_env.batch_size,
+                            env_batchs=env_batchs,
+                            env=eval_env,
+                            assist=assist,
+                            ignore_tiny_diff=True,
+                        )
                         episode_clock = FastEvalClock(fast_eval, args.fast_eval_speedup)
                         pbar.update(n=eval_env.batch_size)
                         assist_notices = None
@@ -177,6 +187,8 @@ def eval(
 
                             profile_info = {
                                 "episode_step": int(t),
+                                "decision_steps": int(t + 1),
+                                "executed_waypoints": stop_executed_waypoint_count(t + 1),
                                 "batch_size": int(eval_env.batch_size),
                                 "seq_names": seq_names,
                                 "map_names": map_names,
@@ -214,7 +226,9 @@ def eval(
                                 "record_type": "episode_end",
                                 "seq_names": [env_batch["seq_name"]],
                                 "map_names": [env_batch["map_name"]],
-                                "control_steps": int(t),
+                                "decision_steps": int(t),
+                                "control_steps": stop_executed_waypoint_count(t),
+                                "executed_waypoints": stop_executed_waypoint_count(t),
                                 "episode_latency_ms": float(episode_clock.now_ms),
                                 "success": bool(batch_state.success[batch_idx]),
                                 "oracle_success": bool(batch_state.oracle_success[batch_idx]),
@@ -223,6 +237,7 @@ def eval(
                             }
                             episode_record.update(episode_clock.metadata())
                             _write_jsonl_line(profile_fp, episode_record)
+                            episode_records.append(episode_record)
                         episode_ok = True
                         episode_latencies_ms.append(float(episode_clock.now_ms))
                         break
@@ -254,6 +269,12 @@ def eval(
         "loop_latency_with_comm_ms": _metric_summary([item["loop_latency_with_comm_ms"] for item in summary_records]),
         "decision_latency_ms": _metric_summary([item["decision_latency_ms"] for item in summary_records]),
         "episode_latency_ms": _metric_summary(episode_latencies_ms),
+        "decision_steps": _metric_summary(
+            [item["decision_steps"] for item in episode_records]
+        ),
+        "executed_waypoints": _metric_summary(
+            [item["executed_waypoints"] for item in episode_records]
+        ),
         "num_records": len(summary_records),
         "comm_delay_enabled": bool(enable_comm_delay),
     }

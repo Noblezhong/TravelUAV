@@ -25,6 +25,18 @@ class CommonArguments:
     fast_eval: bool = field(default=False, metadata={"help": "run evaluation with original-speed logical timing"})
     fast_eval_speedup: float = field(default=5.0, metadata={"help": "AirSim ClockSpeed used by fast evaluation"})
     chunk_waypoints: int = field(default=1, metadata={"help": "continuous eval decision interval in executed waypoints"})
+    max_control_steps: int = field(
+        default=1000,
+        metadata={"help": "maximum low-level waypoint executions for continuous evaluators"},
+    )
+    trajcorr_mode: str = field(
+        default="on",
+        metadata={"help": "trajectory correction mode: off or on"},
+    )
+    trajcorr_state_shift_threshold_m: float = field(
+        default=2.5,
+        metadata={"help": "state-shift threshold for applying trajectory correction"},
+    )
     edge_vlm_host: str = field(default="127.0.0.1", metadata={"help": "edge VLM server host"})
     edge_vlm_bind_host: str = field(default="0.0.0.0", metadata={"help": "edge VLM server bind host"})
     edge_vlm_port: int = field(default=26000, metadata={"help": "edge VLM server port"})

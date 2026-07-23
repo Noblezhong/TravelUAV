@@ -28,12 +28,15 @@ from src.vlnce_src.closeloop_util import (
     setup,
 )
 from src.vlnce_src.continue_eval import _as_bool, _fmt_point, _point_delta, _set_console_log_message_only
-from src.vlnce_src.continue_eval import check_collision_without_tiny_diff
 from src.vlnce_src.comm_delay import (
     BandwidthTrace,
     calculate_latency_ms,
     default_trace_path,
     estimate_uplink_payload_bits_from_episodes,
+)
+from src.vlnce_src.eval_contract import (
+    check_collision_without_tiny_diff,
+    control_budget_reached,
 )
 from src.vlnce_src.edge_vlm_rpc import request as rpc_request
 from src.vlnce_src.fast_eval_time import (
@@ -41,6 +44,12 @@ from src.vlnce_src.fast_eval_time import (
     FastResultTiming,
     action_timing,
     configure_fast_eval_output,
+)
+from src.vlnce_src.trajcorr_runtime import (
+    ContinuousRequestCounter,
+    TRAJECTORY_CORRECTED,
+    TRAJECTORY_ORIGINAL,
+    select_trajectory_mode,
 )
 from utils.logger import logger
 from utils.utils import *
@@ -92,6 +101,31 @@ class EdgeCoarseResult:
     dino_distance_to_target_m: float
 
 
+@dataclass
+class RequestContext:
+    dnn_episode: List[Dict[str, Any]]
+    request_reason: str
+
+
+@dataclass
+class PendingRequest:
+    snapshot: EdgeSnapshot
+    context: RequestContext
+
+
+@dataclass
+class PreparedTrajectory:
+    mode: str
+    waypoints: List[List[float]]
+    profile: Dict[str, Any]
+    coarse_state_shift_m: float
+    coarse_time_shift_ms: float
+    traj_state_shift_m: float
+    traj_time_shift_ms: float
+    observation_latency_ms: float
+    discard_reason: Optional[str] = None
+
+
 def _write_jsonl_line(handle, payload):
     handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
     handle.flush()
@@ -117,12 +151,12 @@ def _coarse_goal_world(observation_pose, observation_rotation, coarse_local):
     return (pose + rot @ coarse).tolist()
 
 
-def _has_executable_waypoints(refined_waypoints) -> bool:
+def _has_executable_waypoints(refined_waypoints, min_waypoints: int = 1) -> bool:
     arr = np.asarray(refined_waypoints, dtype=np.float64)
     if arr.size == 0 or arr.size % 3 != 0:
         return False
     arr = arr.reshape(-1, 3)
-    if len(arr) < 1 or not np.all(np.isfinite(arr)):
+    if len(arr) < int(min_waypoints) or not np.all(np.isfinite(arr)):
         return False
     return True
 
@@ -296,6 +330,134 @@ def _snapshot_with_clock(state: EdgeDNNContinuousState, request_id: int, exec_st
     snapshot = state.build_snapshot(request_id, exec_step)
     snapshot.submitted_logical_ms = clock.now_ms if clock.enabled else None
     return snapshot
+
+
+def _build_request(
+    state: EdgeDNNContinuousState,
+    request_id: int,
+    exec_step: int,
+    clock: FastEvalClock,
+    reason: str,
+) -> PendingRequest:
+    snapshot = _snapshot_with_clock(state, request_id, exec_step, clock)
+    return PendingRequest(
+        snapshot=snapshot,
+        context=RequestContext(
+            dnn_episode=[copy.deepcopy(state.episode[-1])],
+            request_reason=str(reason),
+        ),
+    )
+
+
+def _submit_prepared_request(
+    edge_client,
+    request_contexts: Dict[int, RequestContext],
+    request: PendingRequest,
+) -> None:
+    if not edge_client.submit(request.snapshot):
+        raise RuntimeError(
+            f"failed to submit edge request {request.snapshot.request_id}: planner is busy"
+        )
+    request_contexts[request.snapshot.request_id] = request.context
+
+
+def _prepare_trajectory(
+    model_wrapper: EdgeDNNModelWrapper,
+    state: EdgeDNNContinuousState,
+    result: EdgeCoarseResult,
+    request_context: RequestContext,
+    clock: FastEvalClock,
+    correction_threshold_m: float,
+    correction_enabled: bool,
+) -> PreparedTrajectory:
+    current_pose = state.current_sim_pose()
+    coarse_time_shift_ms = _action_delay_ms(result, clock)
+    decision = select_trajectory_mode(
+        correction_enabled,
+        result.observation_pose,
+        current_pose,
+        correction_threshold_m,
+    )
+
+    observation_latency_ms = 0.0
+    if decision.mode == TRAJECTORY_ORIGINAL:
+        model_episode = request_context.dnn_episode
+        traj_reference_pose = copy.deepcopy(result.observation_pose)
+        traj_reference_logical_ms = result.submitted_logical_ms
+        traj_reference_perf_time = result.submitted_perf_time
+        refined_waypoints, profile = model_wrapper.run_traj_from_world_goal(
+            [model_episode],
+            [result.coarse_goal_world],
+        )
+        refined_current = np.asarray(refined_waypoints[0], dtype=np.float64).tolist()
+        coarse_norm = float(np.linalg.norm(np.asarray(result.coarse_local, dtype=np.float64)))
+        p5_error = (
+            float(_point_delta(refined_current[4], result.coarse_goal_world))
+            if len(refined_current) >= 5
+            else None
+        )
+        profile.update(
+            {
+                "virtual_goal_world": [copy.deepcopy(result.coarse_goal_world)],
+                "original_coarse_norm_m": [coarse_norm],
+                "trajcorr_coarse_norm_m": [coarse_norm],
+                "trajectory_scale": [1.0],
+                "p5_to_virtual_goal_m": [p5_error],
+            }
+        )
+    else:
+        observation_latency_ms = state.refresh_observation()
+        clock.advance_blocking(observation_latency_ms)
+        traj_reference_pose = state.current_sim_pose()
+        traj_reference_logical_ms = clock.now_ms if clock.enabled else None
+        traj_reference_perf_time = time.perf_counter()
+        if state.dones[0]:
+            return PreparedTrajectory(
+                mode=decision.mode,
+                waypoints=[],
+                profile={},
+                coarse_state_shift_m=decision.state_shift_m,
+                coarse_time_shift_ms=coarse_time_shift_ms,
+                traj_state_shift_m=0.0,
+                traj_time_shift_ms=0.0,
+                observation_latency_ms=observation_latency_ms,
+                discard_reason="terminated_during_correction_observation",
+            )
+        current_episode = [copy.deepcopy(state.episode[-1])]
+        refined_waypoints, profile = model_wrapper.run_trajcorr_from_world_goal(
+            [current_episode],
+            [result.coarse_goal_world],
+            [result.coarse_local],
+            [result.observation_pose],
+        )
+        refined_current = np.asarray(refined_waypoints[0], dtype=np.float64).tolist()
+
+    clock.advance_blocking(float(profile.get("traj_latency_ms", 0.0)))
+    traj_state_shift_m = math.dist(traj_reference_pose, state.current_sim_pose())
+    if clock.enabled and traj_reference_logical_ms is not None:
+        traj_time_shift_ms = max(0.0, clock.now_ms - float(traj_reference_logical_ms))
+    else:
+        traj_time_shift_ms = max(
+            0.0,
+            (time.perf_counter() - float(traj_reference_perf_time)) * 1000.0,
+        )
+    return PreparedTrajectory(
+        mode=decision.mode,
+        waypoints=refined_current,
+        profile=profile,
+        coarse_state_shift_m=decision.state_shift_m,
+        coarse_time_shift_ms=coarse_time_shift_ms,
+        traj_state_shift_m=traj_state_shift_m,
+        traj_time_shift_ms=traj_time_shift_ms,
+        observation_latency_ms=observation_latency_ms,
+    )
+
+
+def _profile_first(profile: Dict[str, Any], key: str, default=None):
+    value = profile.get(key, default)
+    if isinstance(value, list) and len(value) == 1:
+        return value[0]
+    return value
 
 
 class LatestOnlyEdgeVLMClient:
@@ -528,8 +690,14 @@ def eval(
     bandwidth_trace: BandwidthTrace,
     enable_comm_delay: bool,
     chunk_waypoints: int,
+    trajcorr_mode: str,
 ):
     assert int(eval_env.batch_size) == 1, "edge DNN eval currently supports batchSize=1 only"
+    assert int(chunk_waypoints) == 5, "TrajCorr comparison requires Continuous w=5"
+    trajcorr_mode = str(trajcorr_mode).strip().lower()
+    if trajcorr_mode not in {"off", "on"}:
+        raise ValueError("trajcorr_mode must be 'off' or 'on'")
+    correction_enabled = trajcorr_mode == "on"
     model_wrapper.eval()
     summary_records = []
 
@@ -547,6 +715,7 @@ def eval(
 
                 episode_ok = False
                 for retry_i in range(3):
+                    bandwidth_trace.reset_for_episode(env_batchs[0]["seq_name"])
                     episode_clock = FastEvalClock(bool(args.fast_eval), args.fast_eval_speedup)
                     edge_client = LatestOnlyEdgeVLMClient(
                         args.edge_vlm_host,
@@ -559,159 +728,308 @@ def eval(
                         state = EdgeDNNContinuousState(env_batchs[0], eval_env, assist)
                         request_counter = 0
                         exec_step = 0
-                        executed_since_request = 0
-                        pending_snapshot: Optional[EdgeSnapshot] = None
+                        request_contexts: Dict[int, RequestContext] = {}
+                        pending_request: Optional[PendingRequest] = None
                         active_coarse_result: Optional[EdgeCoarseResult] = None
                         active_traj: List[List[float]] = []
                         active_index = 0
-                        active_dnn_profile: Optional[Dict[str, Any]] = None
-                        refine_observation_pending = False
+                        active_dnn_profile: Dict[str, Any] = {}
+                        active_mode: Optional[str] = None
+                        active_coarse_state_shift_m = 0.0
+                        active_coarse_time_shift_ms = 0.0
+                        active_traj_state_shift_m = 0.0
+                        active_traj_time_shift_ms = 0.0
                         active_refine_obs_latency_ms = 0.0
+                        continuous_counter = ContinuousRequestCounter(request_interval=5)
+                        correction_threshold_m = float(args.trajcorr_state_shift_threshold_m)
 
-                        warmup_snapshot = _snapshot_with_clock(state, request_counter, exec_step, episode_clock)
-                        assert edge_client.submit(warmup_snapshot), "failed to submit warmup VLM request"
-                        active_coarse_result = _mark_result_applied(edge_client.wait_result(), episode_clock)
-                        action_delay_ms = _action_delay_ms(active_coarse_result, episode_clock)
-                        state_drift_m = math.dist(active_coarse_result.observation_pose, state.current_sim_pose())
-                        state.apply_edge_stop_result(
-                            active_coarse_result.predict_done,
-                            active_coarse_result.dino_distance_to_target_m,
-                        )
-                        if not state.dones[0]:
+                        def submit_pending_if_idle() -> bool:
+                            nonlocal pending_request
+                            if pending_request is None or edge_client.has_inflight():
+                                return False
+                            _submit_prepared_request(
+                                edge_client,
+                                request_contexts,
+                                pending_request,
+                            )
+                            pending_request = None
+                            return True
+
+                        def schedule_request(reason: str, refresh: bool) -> tuple[float, Optional[int]]:
+                            nonlocal request_counter, pending_request
+                            observation_latency_ms = 0.0
+                            if refresh:
+                                observation_latency_ms = state.refresh_observation()
+                                episode_clock.advance_blocking(observation_latency_ms)
+                            if state.dones[0]:
+                                return observation_latency_ms, None
                             state.record_request_ne()
-                        _print_edge_result(episode_idx, active_coarse_result, action_delay_ms, state_drift_m)
-
-                        while not state.dones[0] and exec_step < int(args.maxWaypoints):
-                            new_result = edge_client.poll_result()
-                            if new_result is not None:
-                                active_coarse_result = _mark_result_applied(new_result, episode_clock)
-                                active_traj = []
-                                active_index = 0
-                                active_dnn_profile = None
-                                refine_observation_pending = True
-                                active_refine_obs_latency_ms = 0.0
-                                action_delay_ms = _action_delay_ms(active_coarse_result, episode_clock)
-                                state_drift_m = math.dist(active_coarse_result.observation_pose, state.current_sim_pose())
-                                state.apply_edge_stop_result(
-                                    active_coarse_result.predict_done,
-                                    active_coarse_result.dino_distance_to_target_m,
+                            if state.dones[0]:
+                                return observation_latency_ms, None
+                            request_counter += 1
+                            request = _build_request(
+                                state,
+                                request_counter,
+                                exec_step,
+                                episode_clock,
+                                reason,
+                            )
+                            if edge_client.has_inflight():
+                                pending_request = request
+                            else:
+                                _submit_prepared_request(
+                                    edge_client,
+                                    request_contexts,
+                                    request,
                                 )
-                                _print_edge_result(episode_idx, active_coarse_result, action_delay_ms, state_drift_m)
-                                if state.dones[0]:
-                                    break
-                                if pending_snapshot is not None and not edge_client.has_inflight():
-                                    edge_client.submit(pending_snapshot)
-                                    pending_snapshot = None
+                            return observation_latency_ms, request_counter
 
-                            if active_coarse_result is None:
-                                active_coarse_result = _mark_result_applied(edge_client.wait_result(), episode_clock)
-                                active_traj = []
-                                active_index = 0
-                                active_dnn_profile = None
-                                refine_observation_pending = True
-                                active_refine_obs_latency_ms = 0.0
-                                action_delay_ms = _action_delay_ms(active_coarse_result, episode_clock)
-                                state_drift_m = math.dist(active_coarse_result.observation_pose, state.current_sim_pose())
-                                state.apply_edge_stop_result(
-                                    active_coarse_result.predict_done,
-                                    active_coarse_result.dino_distance_to_target_m,
-                                )
-                                _print_edge_result(episode_idx, active_coarse_result, action_delay_ms, state_drift_m)
-                                if state.dones[0]:
-                                    break
-                                continue
-
-                            current_pose = state.current_sim_pose()
-                            if active_coarse_result.coarse_goal_world is None:
+                        def consume_result(result: EdgeCoarseResult) -> Optional[PreparedTrajectory]:
+                            request_context = request_contexts.pop(result.request_id, None)
+                            if request_context is None:
                                 raise RuntimeError(
-                                    "edge VLM returned no coarse goal without terminating the episode: "
-                                    f"request_id={active_coarse_result.request_id}, "
-                                    f"predict_done={active_coarse_result.predict_done}, "
-                                    f"distance_to_target_m={active_coarse_result.dino_distance_to_target_m:.2f}"
+                                    f"missing request-time DNN observation for request {result.request_id}"
                                 )
-                            coarse_goal_distance = _point_delta(active_coarse_result.coarse_goal_world, current_pose)
+                            action_delay_ms = _action_delay_ms(result, episode_clock)
+                            state_drift_m = math.dist(result.observation_pose, state.current_sim_pose())
+                            state.apply_edge_stop_result(
+                                result.predict_done,
+                                result.dino_distance_to_target_m,
+                            )
+                            _print_edge_result(episode_idx, result, action_delay_ms, state_drift_m)
 
-                            dnn_ran_this_step = False
-                            if active_index >= len(active_traj):
-                                if active_dnn_profile is not None:
-                                    if not state.dones[0] and not edge_client.has_inflight():
-                                        if pending_snapshot is not None:
-                                            edge_client.submit(pending_snapshot)
-                                            pending_snapshot = None
-                                        else:
-                                            request_counter += 1
-                                            edge_client.submit(
-                                                _snapshot_with_clock(state, request_counter, exec_step, episode_clock)
-                                            )
-                                    active_coarse_result = None
-                                    active_traj = []
-                                    active_index = 0
-                                    active_dnn_profile = None
-                                    continue
-                                if refine_observation_pending:
-                                    active_refine_obs_latency_ms = state.refresh_observation()
-                                    episode_clock.advance_blocking(active_refine_obs_latency_ms)
-                                    refine_observation_pending = False
-                                    if state.dones[0]:
-                                        break
-                                if active_coarse_result.coarse_local is None:
+                            prepared = None
+                            if not state.dones[0]:
+                                if result.coarse_goal_world is None:
+                                    raise RuntimeError(
+                                        "edge VLM returned no coarse goal without terminating the episode: "
+                                        f"request_id={result.request_id}, "
+                                        f"predict_done={result.predict_done}, "
+                                        f"distance_to_target_m={result.dino_distance_to_target_m:.2f}"
+                                    )
+                                if result.coarse_local is None:
                                     raise RuntimeError(
                                         "edge VLM returned no coarse vector without terminating the episode: "
-                                        f"request_id={active_coarse_result.request_id}"
+                                        f"request_id={result.request_id}"
                                     )
-                                refined_waypoints, dnn_profile = model_wrapper.run_trajcorr_from_world_goal(
-                                    [state.episode],
-                                    [active_coarse_result.coarse_goal_world],
-                                    [active_coarse_result.coarse_local],
-                                    [active_coarse_result.observation_pose],
+                                prepared = _prepare_trajectory(
+                                    model_wrapper,
+                                    state,
+                                    result,
+                                    request_context,
+                                    episode_clock,
+                                    correction_threshold_m,
+                                    correction_enabled,
                                 )
-                                if episode_clock.enabled:
-                                    episode_clock.advance_blocking(float(dnn_profile.get("traj_latency_ms", 0.0)))
-                                refined_current = np.asarray(refined_waypoints[0]).tolist()
-                                if not _has_executable_waypoints(refined_current):
-                                    state.dones[0] = True
-                                    record = {
-                                        "record_type": "dnn_invalid",
-                                        "exec_step": int(exec_step),
-                                        "request_id": int(active_coarse_result.request_id),
-                                        "seq_names": [env_batchs[0]["seq_name"]],
-                                        "map_names": [env_batchs[0]["map_name"]],
-                                        "coarse_local": copy.deepcopy(active_coarse_result.coarse_local),
-                                        "coarse_goal_world": copy.deepcopy(active_coarse_result.coarse_goal_world),
-                                        "coarse_goal_world_source": active_coarse_result.coarse_goal_world_source,
-                                        "legacy_body_goal_world": copy.deepcopy(
-                                            active_coarse_result.legacy_body_goal_world
-                                        ),
-                                        "edge_compute_latency_ms": float(active_coarse_result.edge_compute_latency_ms),
-                                        "fast_eval": bool(episode_clock.enabled),
-                                        "fast_eval_speedup": float(
-                                            episode_clock.speedup if episode_clock.enabled else 1.0
-                                        ),
-                                        "wall_elapsed_ms": float(episode_clock.wall_elapsed_ms),
-                                        "logical_elapsed_ms": float(episode_clock.now_ms),
-                                        "result_ready_logical_ms": active_coarse_result.ready_logical_ms,
-                                        "result_applied_logical_ms": active_coarse_result.applied_logical_ms,
-                                        "reprojected_coarse": dnn_profile["reprojected_coarse"][0],
-                                        "trajcorr_goal_world": dnn_profile["trajcorr_goal_world"][0],
-                                        "original_coarse_norm_m": float(dnn_profile["original_coarse_norm_m"][0]),
-                                        "trajcorr_coarse_norm_m": float(dnn_profile["trajcorr_coarse_norm_m"][0]),
-                                        "refined_waypoints": copy.deepcopy(refined_current),
-                                        "dones": [bool(x) for x in state.dones],
-                                        "collisions": [bool(x) for x in state.collisions],
-                                        "success": bool(state.success),
-                                    }
-                                    _write_jsonl_line(profile_fp, record)
-                                    summary_records.append(record)
-                                    continue
-                                active_traj = refined_current
-                                active_index = 0
-                                active_dnn_profile = dnn_profile
-                                dnn_ran_this_step = True
+                            _mark_result_applied(result, episode_clock)
 
-                            current_chunk = active_traj[active_index : active_index + 1]
-                            if len(current_chunk) == 0:
-                                active_coarse_result = None
-                                active_dnn_profile = None
+                            profile = prepared.profile if prepared is not None else {}
+                            coarse_state_shift_m = (
+                                prepared.coarse_state_shift_m
+                                if prepared is not None
+                                else state_drift_m
+                            )
+                            coarse_time_shift_ms = (
+                                prepared.coarse_time_shift_ms
+                                if prepared is not None
+                                else action_delay_ms
+                            )
+                            result_record = {
+                                "record_type": "trajectory_result",
+                                "exec_step": int(exec_step),
+                                "request_id": int(result.request_id),
+                                "request_reason": request_context.request_reason,
+                                "seq_names": [env_batchs[0]["seq_name"]],
+                                "map_names": [env_batchs[0]["map_name"]],
+                                "comm_delay_enabled": bool(enable_comm_delay),
+                                "uplink_payload_bits": int(result.uplink_payload_bits),
+                                "uplink_payload_mb": float(result.uplink_payload_mb),
+                                "uplink_bandwidth_mbps": float(result.uplink_bandwidth_mbps),
+                                "uplink_latency_ms": float(result.uplink_latency_ms),
+                                "edge_llm_latency_ms": float(result.edge_llm_latency_ms),
+                                "edge_compute_latency_ms": float(result.edge_compute_latency_ms),
+                                "jetson_dnn_latency_ms": (
+                                    float(profile.get("traj_latency_ms"))
+                                    if profile.get("traj_latency_ms") is not None
+                                    else None
+                                ),
+                                "dnn_refine_observation_latency_ms": (
+                                    float(prepared.observation_latency_ms) if prepared is not None else None
+                                ),
+                                "action_delay_ms": float(coarse_time_shift_ms),
+                                "state_drift_m": float(coarse_state_shift_m),
+                                "coarse_time_shift_ms": float(coarse_time_shift_ms),
+                                "coarse_state_shift_m": float(coarse_state_shift_m),
+                                "traj_time_shift_ms": (
+                                    float(prepared.traj_time_shift_ms)
+                                    if prepared is not None
+                                    else None
+                                ),
+                                "traj_state_shift_m": (
+                                    float(prepared.traj_state_shift_m)
+                                    if prepared is not None
+                                    else None
+                                ),
+                                "trajectory_mode": prepared.mode if prepared is not None else None,
+                                "state_shift_at_apply_m": (
+                                    float(coarse_state_shift_m)
+                                ),
+                                "time_shift_at_apply_ms": (
+                                    float(coarse_time_shift_ms)
+                                ),
+                                "trajcorr_mode": trajcorr_mode,
+                                "correction_threshold_m": float(correction_threshold_m),
+                                "ne_at_apply_m": float(
+                                    state._calculate_distance_from_position(
+                                        state.current_sim_pose()
+                                    )
+                                ),
+                                "virtual_goal_world": copy.deepcopy(
+                                    _profile_first(profile, "virtual_goal_world")
+                                ),
+                                "trajectory_scale": _profile_first(profile, "trajectory_scale"),
+                                "request_trigger_reason": request_context.request_reason,
+                                "request_trigger_waypoint_index": (
+                                    5
+                                    if request_context.request_reason == "continuous_w5"
+                                    else None
+                                ),
+                                "p5_to_virtual_goal_m": _profile_first(
+                                    profile, "p5_to_virtual_goal_m"
+                                ),
+                                "result_discard_reason": (
+                                    prepared.discard_reason if prepared is not None else None
+                                ),
+                                "coarse_local": copy.deepcopy(result.coarse_local),
+                                "coarse_goal_world": copy.deepcopy(result.coarse_goal_world),
+                                "coarse_goal_world_source": result.coarse_goal_world_source,
+                                "legacy_body_goal_world": copy.deepcopy(result.legacy_body_goal_world),
+                                "reprojected_coarse": copy.deepcopy(
+                                    _profile_first(profile, "reprojected_coarse")
+                                ),
+                                "original_coarse_norm_m": _profile_first(
+                                    profile, "original_coarse_norm_m"
+                                ),
+                                "trajcorr_coarse_norm_m": _profile_first(
+                                    profile, "trajcorr_coarse_norm_m"
+                                ),
+                                "refined_waypoints": (
+                                    copy.deepcopy(prepared.waypoints) if prepared is not None else []
+                                ),
+                                "fast_eval": bool(episode_clock.enabled),
+                                "fast_eval_speedup": float(
+                                    episode_clock.speedup if episode_clock.enabled else 1.0
+                                ),
+                                "wall_elapsed_ms": float(episode_clock.wall_elapsed_ms),
+                                "logical_elapsed_ms": float(episode_clock.now_ms),
+                                "result_ready_logical_ms": result.ready_logical_ms,
+                                "result_applied_logical_ms": result.applied_logical_ms,
+                                "success": bool(state.success),
+                                "collision": bool(state.collisions[0]),
+                                "done": bool(state.dones[0]),
+                            }
+                            _write_jsonl_line(profile_fp, result_record)
+                            summary_records.append(result_record)
+                            return prepared
+
+                        def activate_trajectory(
+                            result: EdgeCoarseResult,
+                            prepared: Optional[PreparedTrajectory],
+                        ) -> bool:
+                            nonlocal active_coarse_result
+                            nonlocal active_traj, active_index, active_dnn_profile, active_mode
+                            nonlocal active_coarse_state_shift_m, active_coarse_time_shift_ms
+                            nonlocal active_traj_state_shift_m, active_traj_time_shift_ms
+                            nonlocal active_refine_obs_latency_ms
+                            if prepared is None:
+                                return False
+                            if not _has_executable_waypoints(prepared.waypoints, min_waypoints=7):
+                                state.dones[0] = True
+                                invalid_record = {
+                                    "record_type": "dnn_invalid",
+                                    "exec_step": int(exec_step),
+                                    "request_id": int(result.request_id),
+                                    "seq_names": [env_batchs[0]["seq_name"]],
+                                    "map_names": [env_batchs[0]["map_name"]],
+                                    "trajectory_mode": prepared.mode,
+                                    "refined_waypoints": copy.deepcopy(prepared.waypoints),
+                                    "dones": [bool(x) for x in state.dones],
+                                    "collisions": [bool(x) for x in state.collisions],
+                                    "success": bool(state.success),
+                                }
+                                _write_jsonl_line(profile_fp, invalid_record)
+                                summary_records.append(invalid_record)
+                                return False
+                            active_coarse_result = result
+                            active_traj = prepared.waypoints
+                            active_index = 0
+                            active_dnn_profile = prepared.profile
+                            active_mode = prepared.mode
+                            active_coarse_state_shift_m = prepared.coarse_state_shift_m
+                            active_coarse_time_shift_ms = prepared.coarse_time_shift_ms
+                            active_traj_state_shift_m = prepared.traj_state_shift_m
+                            active_traj_time_shift_ms = prepared.traj_time_shift_ms
+                            active_refine_obs_latency_ms = prepared.observation_latency_ms
+                            return True
+
+                        # Cold start is the only blocking request before an active trajectory exists.
+                        state.record_request_ne()
+                        cold_start_request = _build_request(
+                            state,
+                            request_counter,
+                            exec_step,
+                            episode_clock,
+                            "cold_start",
+                        )
+                        _submit_prepared_request(
+                            edge_client,
+                            request_contexts,
+                            cold_start_request,
+                        )
+
+                        while not state.dones[0] and not control_budget_reached(
+                            exec_step,
+                            args.max_control_steps,
+                        ):
+                            new_result = edge_client.poll_result()
+                            if new_result is not None:
+                                submit_pending_if_idle()
+                                prepared = consume_result(new_result)
+                                if state.dones[0]:
+                                    break
+                                activate_trajectory(new_result, prepared)
+
+                            if active_coarse_result is None or active_index >= len(active_traj):
+                                submit_pending_if_idle()
+                                if not edge_client.has_inflight():
+                                    raise RuntimeError(
+                                        "trajectory buffer exhausted without an edge request in flight"
+                                    )
+                                wait_reason = (
+                                    "cold_start" if active_coarse_result is None else "buffer_exhausted"
+                                )
+                                wait_record = {
+                                    "record_type": "buffer_wait",
+                                    "exec_step": int(exec_step),
+                                    "seq_names": [env_batchs[0]["seq_name"]],
+                                    "map_names": [env_batchs[0]["map_name"]],
+                                    "buffer_exhausted": wait_reason == "buffer_exhausted",
+                                    "wait_reason": wait_reason,
+                                    "logical_elapsed_ms": float(episode_clock.now_ms),
+                                }
+                                _write_jsonl_line(profile_fp, wait_record)
+                                summary_records.append(wait_record)
+                                waited_result = edge_client.wait_result()
+                                submit_pending_if_idle()
+                                prepared = consume_result(waited_result)
+                                if state.dones[0]:
+                                    break
+                                if not activate_trajectory(waited_result, prepared):
+                                    continue
+
+                            current_index = active_index
+                            current_chunk = active_traj[current_index : current_index + 1]
+                            if not current_chunk:
                                 continue
                             action_start = time.perf_counter()
                             eval_env.makeActionsChunk([current_chunk], target_idx=1)
@@ -727,25 +1045,31 @@ def eval(
                             )
                             active_index += 1
                             exec_step += 1
-                            executed_since_request += 1
-
+                            execution_phase = (
+                                "corrected"
+                                if active_mode == TRAJECTORY_CORRECTED
+                                else "original"
+                            )
+                            request_reason = (
+                                "continuous_w5"
+                                if continuous_counter.mark_normal_execution()
+                                else None
+                            )
                             request_obs_latency_ms = 0.0
-                            if executed_since_request >= chunk_waypoints:
-                                request_obs_latency_ms = state.refresh_observation()
-                                episode_clock.advance_blocking(request_obs_latency_ms)
-                                if not state.dones[0]:
-                                    state.record_request_ne()
-                                if not state.dones[0]:
-                                    request_counter += 1
-                                    snapshot = _snapshot_with_clock(state, request_counter, exec_step, episode_clock)
-                                    if edge_client.has_inflight():
-                                        pending_snapshot = snapshot
-                                    else:
-                                        edge_client.submit(snapshot)
-                                executed_since_request = 0
+                            triggered_request_id = None
+                            if request_reason is not None:
+                                request_obs_latency_ms, triggered_request_id = schedule_request(
+                                    request_reason, refresh=True
+                                )
+                                if triggered_request_id is not None:
+                                    continuous_counter.mark_request_submitted()
 
                             action_delay_ms = _action_delay_ms(active_coarse_result, episode_clock)
                             state_drift_m = math.dist(active_coarse_result.observation_pose, state.current_sim_pose())
+                            coarse_goal_distance = _point_delta(
+                                active_coarse_result.coarse_goal_world,
+                                state.current_sim_pose(),
+                            )
                             record = {
                                 "record_type": "execution",
                                 "exec_step": int(exec_step),
@@ -761,18 +1085,29 @@ def eval(
                                 "edge_llm_latency_ms": float(active_coarse_result.edge_llm_latency_ms),
                                 "edge_compute_latency_ms": float(active_coarse_result.edge_compute_latency_ms),
                                 "jetson_dnn_latency_ms": (
-                                    float(active_dnn_profile["traj_latency_ms"]) if dnn_ran_this_step else None
+                                    float(active_dnn_profile["traj_latency_ms"])
+                                    if current_index == 0
+                                    else None
                                 ),
                                 "dnn_refine_observation_latency_ms": (
-                                    float(active_refine_obs_latency_ms) if dnn_ran_this_step else None
+                                    float(active_refine_obs_latency_ms) if current_index == 0 else None
                                 ),
                                 "request_observation_latency_ms": float(request_obs_latency_ms),
+                                "triggered_request_id": triggered_request_id,
+                                "execution_phase": execution_phase,
+                                "continuous_waypoints_since_request": int(continuous_counter.count),
+                                "request_trigger_reason": request_reason,
                                 "airsim_action_latency_ms": float(action_times["airsim_action_latency_ms"]),
                                 "action_wall_time_ms": float(action_times["action_wall_time_ms"]),
                                 "action_sim_time_ms": float(action_times["action_sim_time_ms"]),
                                 "action_delay_ms": float(action_delay_ms),
                                 "state_drift_m": float(state_drift_m),
                                 "coarse_goal_distance_m": float(coarse_goal_distance),
+                                "navigation_error_m": float(
+                                    state._calculate_distance_from_position(
+                                        state.current_sim_pose()
+                                    )
+                                ),
                                 "fast_eval": bool(episode_clock.enabled),
                                 "fast_eval_speedup": float(episode_clock.speedup if episode_clock.enabled else 1.0),
                                 "wall_elapsed_ms": float(episode_clock.wall_elapsed_ms),
@@ -783,10 +1118,38 @@ def eval(
                                 "coarse_goal_world": copy.deepcopy(active_coarse_result.coarse_goal_world),
                                 "coarse_goal_world_source": active_coarse_result.coarse_goal_world_source,
                                 "legacy_body_goal_world": copy.deepcopy(active_coarse_result.legacy_body_goal_world),
-                                "reprojected_coarse": copy.deepcopy(active_dnn_profile["reprojected_coarse"][0]),
-                                "trajcorr_goal_world": copy.deepcopy(active_dnn_profile["trajcorr_goal_world"][0]),
-                                "original_coarse_norm_m": float(active_dnn_profile["original_coarse_norm_m"][0]),
-                                "trajcorr_coarse_norm_m": float(active_dnn_profile["trajcorr_coarse_norm_m"][0]),
+                                "reprojected_coarse": copy.deepcopy(
+                                    _profile_first(active_dnn_profile, "reprojected_coarse")
+                                ),
+                                "trajectory_mode": active_mode,
+                                "trajcorr_mode": trajcorr_mode,
+                                "coarse_state_shift_m": float(active_coarse_state_shift_m),
+                                "coarse_time_shift_ms": float(active_coarse_time_shift_ms),
+                                "traj_state_shift_m": float(active_traj_state_shift_m),
+                                "traj_time_shift_ms": float(active_traj_time_shift_ms),
+                                "state_shift_at_apply_m": float(active_coarse_state_shift_m),
+                                "time_shift_at_apply_ms": float(active_coarse_time_shift_ms),
+                                "correction_threshold_m": float(correction_threshold_m),
+                                "virtual_goal_world": copy.deepcopy(
+                                    _profile_first(active_dnn_profile, "virtual_goal_world")
+                                ),
+                                "trajectory_scale": _profile_first(
+                                    active_dnn_profile, "trajectory_scale"
+                                ),
+                                "request_trigger_waypoint_index": (
+                                    5 if request_reason == "continuous_w5" else None
+                                ),
+                                "p5_to_virtual_goal_m": _profile_first(
+                                    active_dnn_profile, "p5_to_virtual_goal_m"
+                                ),
+                                "result_discard_reason": None,
+                                "active_waypoint_index": int(active_index),
+                                "original_coarse_norm_m": float(
+                                    _profile_first(active_dnn_profile, "original_coarse_norm_m")
+                                ),
+                                "trajcorr_coarse_norm_m": float(
+                                    _profile_first(active_dnn_profile, "trajcorr_coarse_norm_m")
+                                ),
                                 "refined_waypoints": copy.deepcopy(active_traj),
                                 "success": bool(state.success),
                                 "collision": bool(state.collisions[0]),
@@ -806,6 +1169,11 @@ def eval(
                             "seq_names": [env_batchs[0]["seq_name"]],
                             "map_names": [env_batchs[0]["map_name"]],
                             "control_steps": int(exec_step),
+                            "max_control_steps": int(args.max_control_steps),
+                            "control_budget_reached": control_budget_reached(
+                                exec_step,
+                                args.max_control_steps,
+                            ),
                             "episode_latency_ms": float(episode_clock.now_ms),
                             "success": bool(state.success),
                             "oracle_success": bool(state.oracle_success),
@@ -835,16 +1203,45 @@ def eval(
 
     execution_records = [item for item in summary_records if item.get("record_type") == "execution"]
     episode_records = [item for item in summary_records if item.get("record_type") == "episode_end"]
-    decision_records = []
-    seen_requests = set()
+    decision_records = [
+        item for item in summary_records if item.get("record_type") == "trajectory_result"
+    ]
+    mode_counts = {
+        mode: sum(item.get("trajectory_mode") == mode for item in decision_records)
+        for mode in (TRAJECTORY_ORIGINAL, TRAJECTORY_CORRECTED)
+    }
+    mode_total = sum(mode_counts.values())
+    applied_count = mode_counts[TRAJECTORY_ORIGINAL] + mode_counts[TRAJECTORY_CORRECTED]
+    decision_by_key = {
+        ((item.get("seq_names") or [None])[0], item.get("request_id")): item
+        for item in decision_records
+    }
+    execution_by_key = {}
     for item in execution_records:
-        request_id = item.get("request_id")
-        seq_name = (item.get("seq_names") or [None])[0]
-        request_key = (seq_name, request_id)
-        if request_id is None or request_key in seen_requests:
-            continue
-        seen_requests.add(request_key)
-        decision_records.append(item)
+        key = ((item.get("seq_names") or [None])[0], item.get("request_id"))
+        execution_by_key.setdefault(key, []).append(item)
+    execution_counts = {
+        key: len(records)
+        for key, records in execution_by_key.items()
+    }
+
+    def ne_progress_after_five(mode):
+        values = []
+        for key, decision in decision_by_key.items():
+            if decision.get("trajectory_mode") != mode:
+                continue
+            start_ne = decision.get("ne_at_apply_m")
+            records = sorted(
+                execution_by_key.get(key, []),
+                key=lambda item: int(item.get("exec_step", 0)),
+            )
+            if start_ne is None or not records:
+                continue
+            endpoint = records[min(4, len(records) - 1)].get("navigation_error_m")
+            if endpoint is not None:
+                values.append(float(start_ne) - float(endpoint))
+        return _metric_summary(values)
+
     summary = {
         "decision_total_latency_ms": _metric_summary(
             [
@@ -853,17 +1250,81 @@ def eval(
                 for item in decision_records
             ]
         ),
-        "uplink_latency_ms": _metric_summary([item.get("uplink_latency_ms") for item in execution_records]),
-        "edge_llm_latency_ms": _metric_summary([item.get("edge_llm_latency_ms") for item in execution_records]),
-        "edge_compute_latency_ms": _metric_summary([item.get("edge_compute_latency_ms") for item in execution_records]),
-        "jetson_dnn_latency_ms": _metric_summary([item.get("jetson_dnn_latency_ms") for item in execution_records]),
+        "uplink_latency_ms": _metric_summary([item.get("uplink_latency_ms") for item in decision_records]),
+        "edge_llm_latency_ms": _metric_summary([item.get("edge_llm_latency_ms") for item in decision_records]),
+        "edge_compute_latency_ms": _metric_summary([item.get("edge_compute_latency_ms") for item in decision_records]),
+        "jetson_dnn_latency_ms": _metric_summary(
+            [item.get("jetson_dnn_latency_ms") for item in decision_records]
+        ),
         "airsim_action_latency_ms": _metric_summary([item.get("airsim_action_latency_ms") for item in execution_records]),
         "action_wall_time_ms": _metric_summary([item.get("action_wall_time_ms") for item in execution_records]),
         "action_sim_time_ms": _metric_summary([item.get("action_sim_time_ms") for item in execution_records]),
-        "action_delay_ms": _metric_summary([item.get("action_delay_ms") for item in execution_records]),
-        "state_drift_m": _metric_summary([item.get("state_drift_m") for item in execution_records]),
+        "action_delay_ms": _metric_summary(
+            [item.get("coarse_time_shift_ms") for item in decision_records]
+        ),
+        "state_drift_m": _metric_summary(
+            [item.get("coarse_state_shift_m") for item in decision_records]
+        ),
+        "coarse_time_shift_ms": _metric_summary(
+            [item.get("coarse_time_shift_ms") for item in decision_records]
+        ),
+        "coarse_state_shift_m": _metric_summary(
+            [item.get("coarse_state_shift_m") for item in decision_records]
+        ),
+        "traj_time_shift_ms": _metric_summary(
+            [item.get("traj_time_shift_ms") for item in decision_records]
+        ),
+        "traj_state_shift_m": _metric_summary(
+            [item.get("traj_state_shift_m") for item in decision_records]
+        ),
         "episode_latency_ms": _metric_summary([item.get("episode_latency_ms") for item in episode_records]),
         "final_ne_m": _metric_summary([item.get("final_ne_m") for item in episode_records]),
+        "trajectory_mode_counts": mode_counts,
+        "trajectory_mode_ratio": {
+            key: (float(value) / mode_total if mode_total else 0.0)
+            for key, value in mode_counts.items()
+        },
+        "correction_trigger_rate": (
+            float(mode_counts[TRAJECTORY_CORRECTED]) / applied_count if applied_count else 0.0
+        ),
+        "p5_endpoint_error_m": _metric_summary(
+            [item.get("p5_to_virtual_goal_m") for item in decision_records]
+        ),
+        "executed_waypoints_per_trajectory": _metric_summary(execution_counts.values()),
+        "corrected_execution_waypoints": int(
+            sum(
+                execution_counts.get(key, 0)
+                for key, decision in decision_by_key.items()
+                if decision.get("trajectory_mode") == TRAJECTORY_CORRECTED
+            )
+        ),
+        "original_ne_progress_5_steps_m": ne_progress_after_five(
+            TRAJECTORY_ORIGINAL
+        ),
+        "corrected_ne_progress_5_steps_m": ne_progress_after_five(
+            TRAJECTORY_CORRECTED
+        ),
+        "p5_request_count": sum(
+            item.get("request_trigger_waypoint_index") == 5 for item in execution_records
+        ),
+        "buffer_exhausted_wait_count": sum(
+            item.get("record_type") == "buffer_wait"
+            and item.get("wait_reason") == "buffer_exhausted"
+            for item in summary_records
+        ),
+        "request_reason_counts": {
+            reason: sum(
+                item.get("request_reason") == reason
+                for item in decision_records
+            )
+            for reason in (
+                "cold_start",
+                "continuous_w5",
+            )
+        },
+        "trajcorr_mode": trajcorr_mode,
+        "max_control_steps": int(args.max_control_steps),
+        "correction_threshold_m": float(args.trajcorr_state_shift_threshold_m),
         "num_decision_records": len(decision_records),
         "num_episode_records": len(episode_records),
         "num_records": len(summary_records),
@@ -875,7 +1336,10 @@ def eval(
 if __name__ == "__main__":
     _configure_air_sim_server()
     _set_console_log_message_only()
-    configure_fast_eval_output(args, "continuous_dnn")
+    trajcorr_mode = str(args.trajcorr_mode).strip().lower()
+    if trajcorr_mode not in {"off", "on"}:
+        raise ValueError("trajcorr_mode must be 'off' or 'on'")
+    configure_fast_eval_output(args, f"trajcorr_{trajcorr_mode}")
     eval_save_path = args.eval_save_path
     os.makedirs(eval_save_path, exist_ok=True)
     profile_log_dir = os.path.join(eval_save_path, "profile_logs")
@@ -897,6 +1361,7 @@ if __name__ == "__main__":
     print("Assist setting: always_help --", args.always_help, "    use_gt --", args.use_gt)
     print(
         f"Edge DNN setting: host={args.edge_vlm_host}:{args.edge_vlm_port}, "
+        f"trajcorr_mode={trajcorr_mode}, "
         f"chunk_waypoints={args.chunk_waypoints}, enable_comm_delay={args.enable_comm_delay}, "
         f"fast_eval={args.fast_eval}, fast_eval_speedup={args.fast_eval_speedup}"
     )
@@ -905,8 +1370,14 @@ if __name__ == "__main__":
     trace_path = args.comm_trace_csv_path or default_trace_path()
     bandwidth_trace = BandwidthTrace(trace_path)
     enable_comm_delay = _as_bool(args.enable_comm_delay)
-    profile_log_path = os.path.join(profile_log_dir, f"edge_dnn_w{chunk_waypoints}_{args.make_dir_time}.jsonl")
-    summary_path = os.path.join(profile_log_dir, f"edge_dnn_w{chunk_waypoints}_{args.make_dir_time}_summary.json")
+    profile_log_path = os.path.join(
+        profile_log_dir,
+        f"trajcorr_{trajcorr_mode}_{args.make_dir_time}.jsonl",
+    )
+    summary_path = os.path.join(
+        profile_log_dir,
+        f"trajcorr_{trajcorr_mode}_{args.make_dir_time}_summary.json",
+    )
     eval(
         model_wrapper=model_wrapper,
         assist=assist,
@@ -916,5 +1387,6 @@ if __name__ == "__main__":
         bandwidth_trace=bandwidth_trace,
         enable_comm_delay=enable_comm_delay,
         chunk_waypoints=chunk_waypoints,
+        trajcorr_mode=trajcorr_mode,
     )
     eval_env.delete_VectorEnvUtil()
