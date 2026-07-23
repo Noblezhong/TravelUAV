@@ -4,7 +4,62 @@
 >
 > TC ON 代码提交：`251dcd4`
 >
-> 工作站、GitHub 和 Jetson 仓库已同步至该提交。
+> 本文档是轨迹修正实验的唯一工作台账。每完成一个阶段，都必须同步更新“当前状态、下一步任务、实验结果和 reviewer 结论”。
+
+## 0. 如何根据本文档继续工作
+
+当用户说“根据文档继续完成科研实验任务”时，执行者必须：
+
+1. 先读取本文档，不依赖聊天记忆猜测实验状态。
+2. 检查“当前状态”和“下一步唯一任务”，只推进第一个未完成任务。
+3. 执行前确认不会中断正在运行的实验，也不会覆盖已有结果目录。
+4. 不修改第 2 节的统一评估口径；如确需修改，先停止执行并交给 reviewer 决定哪些基线需要重跑。
+5. 每完成一个实验或代码里程碑，更新本文档并提交 Git。
+6. 到达标记为“Reviewer checkpoint”的位置时，先汇报证据、问题和建议，等待用户 rebuttal 后再进入下一阶段。
+
+职责分工：
+
+- **执行者（Codex）**：检查运行状态、审查代码、执行或指导实验、统计指标、定位异常、更新本文档。
+- **Reviewer（用户）**：质疑实验公平性、判断结果是否支持研究假设、批准关键代码设计和下一阶段实验。
+
+工作环境：
+
+- 工作站仓库：`/HDD1/code/TravelUAV`
+- Jetson：`zt@192.168.105.13`
+- Jetson 仓库：`/home/zt/code/TravelUAV`
+- 工作站共享结果：`/HDD1/traveluav_eval_shared`
+- Jetson 共享结果：`/home/zt/traveluav_eval_shared`
+- 当前 TC OFF 日志：
+  `/home/zt/traveluav_eval_shared/eval_trajcorr_off_0723-1551_launcher.log`
+
+运行约束：
+
+- 当前 TC OFF 完成前，不重启 evaluator，不在 Jetson 再次 pull，不切换其运行代码。
+- 只在用户主动询问、出现异常，或累计增加约 100 个 episode 时检查长时间实验。
+- 结果目录必须使用独立 Run ID，禁止覆盖或混合续跑不同代码版本。
+
+## 当前任务看板
+
+### 已完成
+
+- [x] 统一 TC OFF/ON 的 `max_control_steps=1000`。
+- [x] 实现 TC ON 的 state-shift gate、目标锁定、请求冻结和回头 waypoint 过滤。
+- [x] TC ON 代码提交为 `251dcd4`，静态与单元测试通过。
+- [x] 启动正式 TC OFF：`0723-1551`。
+
+### 正在进行
+
+- [ ] 正式 TC OFF 完整运行 1418 个 episode。
+
+### 下一步唯一任务
+
+- [ ] TC OFF 完成后，先验收 TC OFF，再运行对齐后的正式 Stop-and-go，得到精度上限。
+
+### 暂时不要做
+
+- [ ] 不启动完整 TC ON。
+- [ ] 不根据旧 Stop-and-go 或旧 Continuous 结果计算正式恢复率。
+- [ ] 不调整 TC ON 阈值、目标锁定或请求逻辑，直到 TC OFF 与正式 Stop-and-go 的结果被 reviewer 审查。
 
 ## 1. 研究目标
 
@@ -120,7 +175,7 @@ TC ON 只有在 `0723-1551` 完成后，通过小规模配对运行验证，才�
 当前验证情况：
 
 - `py_compile`、Shell 语法和 `git diff --check` 已通过。
-- TrajCorr、评估边界、Fast Eval 和 velocity settle 共 34 项静态/单元测试通过。
+- TrajCorr、评估边界、Fast Eval 和 velocity settle 共 39 项静态/单元测试通过。
 - 尚未做 AirSim runtime 验证，因此不能仅凭静态测试宣称 TC ON 已有效。
 
 ## 4. 后续执行顺序
@@ -130,13 +185,56 @@ TC ON 只有在 `0723-1551` 完成后，通过小规模配对运行验证，才�
 - [ ] 等待 `0723-1551` 完成 1418 个 episode。
 - [ ] 检查所有 episode 均有唯一终止记录，无缺失或重复。
 - [ ] 检查控制步不超过 1000，重试 episode 最终正确落盘。
-- [ ] 统计：
-  `SR / OSR / CR / Avg waypoints / Avg NE`
-- [ ] 统计：
-  `Avg T_dec / Avg T_action / Avg time shift / Avg state shift / Avg episode e2e latency`
+- [ ] 统计导航精度：
+  `SR / OSR / CR / Avg waypoints / Avg NE`。
+- [ ] 统计系统性能：
+  `Avg T_dec / Avg T_action / Avg time shift / Avg state drift / Avg episode e2e latency`。
 - [ ] 保存 episode 列表、带宽映射、代码 commit 和 Fast Eval manifest，作为 TC ON 与 Stop-and-go 的共同实验配置。
 
-### 阶段二：完成正式 TC ON 代码
+**Reviewer checkpoint A：**
+
+- TC OFF 是否确实等价于关闭轨迹修正的 Continuous `w=5`？
+- 是否存在异常提前终止、缺失 episode 或统计口径错误？
+- 结果能否作为正式异步基线？
+
+只有 reviewer 接受 TC OFF 后，才能启动正式 Stop-and-go。
+
+### 阶段二：运行并验收正式 Stop-and-go
+
+- [ ] 在启动前静态确认 Stop-and-go 与 TC OFF 的数据集、模型、通信 trace、碰撞、DINO、SR/OSR、NE regression 和 Fast Eval 口径一致。
+- [ ] 确认 Stop-and-go 使用 `maxWaypoints=200` 个决策步，每步实际最多执行 P1-P5，理论控制点预算为 1000。
+- [ ] 使用独立目录运行完整 1418 条：
+  `eval_stop_go_<RUN_ID>_fast_x10`。
+- [ ] 检查所有 episode 的终止记录、控制预算、重试和结果落盘。
+- [ ] 输出与 TC OFF 完全相同的导航精度和系统性能指标。
+- [ ] 计算精度上限差：
+
+```text
+recoverable SR gap = SR_StopGo - SR_TC_OFF
+recoverable OSR gap = OSR_StopGo - OSR_TC_OFF
+```
+
+**Reviewer checkpoint B：**
+
+- Stop-and-go 是否可以作为相同模型和预算下的正式精度上限？
+- TC OFF 与 Stop-and-go 的差距是否足以支持轨迹修正研究？
+- 哪些 episode 属于“TC OFF 失败但 Stop-and-go 成功”的可恢复样本？
+
+若 Stop-and-go 本身出现边界或代码问题，先修复并重跑受影响实验，不进入 TC ON。
+
+### 阶段三：冻结正式对照与构建 TC ON 验证集
+
+- [ ] 固定 TC OFF 和 Stop-and-go 的正式结果目录、commit、episode 列表及带宽映射。
+- [ ] 使用 `scripts/build_trajcorr_eval_subset.py` 生成配对验证集。
+- [ ] 小规模集合优先包括：
+  60 个 TC OFF 失败但 Stop-and-go 成功的 recoverable episode；
+  20 个 TC OFF 成功 episode；
+  20 个两者均失败的随机 episode。
+- [ ] 保存 subset JSON 和 manifest，但不把生成的数据文件提交 Git。
+
+### 阶段四：完成 TC ON 代码运行前验收
+
+已完成的代码工作：
 
 - [x] 只在 corrected trajectory 分支进入目标锁定，TC OFF 保持全局 `w=5`。
 - [x] 加入 `NORMAL / TARGET_LOCK / WAIT_REFRESH` 状态机。
@@ -148,36 +246,56 @@ TC ON 只有在 `0723-1551` 完成后，通过小规模配对运行验证，才�
 - [x] 同步工作站、GitHub 和 Jetson 磁盘仓库。
 - [ ] `0723-1551` 完成后再启动新 evaluator，禁止当前 TC OFF 中途切换代码版本。
 
-### 阶段三：新代码下的 TC OFF 兼容性回放
+运行 TC ON 前的最小回归检查：
 
 由于正式 TC OFF `0723-1551` 使用修改前的 Jetson 进程，而 TC ON 修改位于 OFF/ON 共用 evaluator 中，完整 TC ON 前必须验证 OFF 分支未发生行为变化。
 
-- [ ] 从 `0723-1551` 选择相同的 10–30 个 episode。
+- [ ] 从 `0723-1551` 选择相同的 3–5 个 episode。
 - [ ] 使用同步后的新代码运行 `trajcorr_mode=off`。
 - [ ] 按 episode 对齐请求步、带宽序列、buffer 替换、控制步和终止类型。
 - [ ] 若行为一致，保留 `0723-1551` 作为完整正式 TC OFF，不重新运行 1418 条。
 - [ ] 若出现 OFF 行为差异，先定位共享代码；只有确认差异影响导航行为或指标时才重跑完整 TC OFF。
 
-### 阶段四：TC ON 小规模配对验证
+### 阶段五：TC ON 小规模运行验证
 
-- [ ] 使用相同的 10–30 个 episode 运行 TC ON，检查状态机、冻结计数、pending 清理和悬停等待是否符合日志。
-- [ ] 扩展到 100 个配对 episode，优先覆盖旧 Continuous 失败但 Stop-and-go 成功的样本。
-- [ ] 检查 ON 的 SR/OSR、Avg NE 和 CR；若出现明显退化，先分析修正触发率、目标到达率、回头过滤和局部 NE progress，不直接运行 1418 条。
+- [ ] 先运行与回归检查相同的 3–5 个 TC ON episode。
+- [ ] 确认小 state shift 保持 Continuous `w=5`。
+- [ ] 确认大 state shift 进入目标锁定，修正期间冻结请求计数。
+- [ ] 确认到达、越过目标或 buffer 耗尽后重新请求并等待。
+- [ ] 确认不会执行回头 waypoint，不会覆盖已有结果。
+- [ ] 扩展到正式的 100 个配对 episode。
+- [ ] 比较 `SR / OSR / CR / Avg NE`、修正触发率、旧目标到达率和修正阶段局部 NE progress。
 
-### 阶段五：完整运行 TC ON
+**Reviewer checkpoint C：**
+
+- TC ON 的轨迹修正行为是否符合设计，而不是通过改变终止条件获得收益？
+- TC ON 是否至少满足：SR 或 OSR 提升、Avg NE 降低、CR 不明显恶化？
+- 若不满足，应修改哪一项 TC ON 内部机制？不得顺手修改公共评估边界。
+
+只有 reviewer 批准后，才能运行完整 TC ON。
+
+### 阶段六：完整运行 TC ON
 
 - [ ] 使用与 `0723-1551` 相同的 episode、带宽映射、代码口径和控制预算运行 1418 条。
 - [ ] 使用新的时间戳目录：
   `eval_trajcorr_on_<RUN_ID>_fast_x10`
 - [ ] 确认 OFF/ON episode 一一对应。
+- [ ] 完成后按 episode 配对统计 TC OFF、TC ON 和 Stop-and-go。
 
-### 阶段六：重跑正式 Stop-and-go
+### 阶段七：最终结论与论文表格
 
-- [ ] 使用已经对齐的 `scripts/eval.sh` 运行 1418 条。
-- [ ] 输出目录自动带时间戳和 Fast Eval 后缀：
-  `eval_stop_go_<RUN_ID>_fast_x10`
-- [ ] Stop-and-go 保持“请求期间停止等待、结果返回后一次执行 5 点”的原始行为。
-- [ ] 不再使用历史 `/HDD1/code/TravelUAV/eval_stop_go` 作为正式精度上限。
+- [ ] 输出三组统一导航精度与系统性能表格。
+- [ ] 统计 `OFF failure -> ON success` 与 `OFF success -> ON failure`。
+- [ ] 完成 McNemar 检验和 SR recovery ratio。
+- [ ] 区分两类结论：
+  - 轨迹修正是否提升 Continuous `w=5` 的精度；
+  - 轨迹修正增加了多少请求、等待和 episode e2e latency。
+- [ ] 将最终结果、失败案例和 reviewer 结论写回本文档。
+
+**Reviewer checkpoint D：**
+
+- 证据是否足以支持“轨迹修正恢复异步 Continuous 导航精度”的论文表述？
+- 是否需要做第 6 节的可选消融？
 
 ## 5. 最终比较
 
@@ -247,7 +365,7 @@ SR recovery ratio =
 - 修正 buffer 耗尽处理；
 - 修正期间的请求冻结和恢复策略。
 
-这些改动效果不好时，只需重新运行 TC ON。修改后仍应先做 10–30 个 episode smoke test。
+这些改动效果不好时，只需重新运行 TC ON。修改后仍应先做 3–5 个 episode smoke test，再进行 100 个配对 episode 验证。
 
 ### 7.2 需要验证或重跑 TC OFF
 
@@ -275,12 +393,53 @@ SR recovery ratio =
 
 若只影响 TC evaluator，则重跑 TC OFF/ON；若 Stop-and-go 也共享该边界，则三组均需重新运行。
 
-## 8. 下一步操作
+## 8. 实验记录模板
 
-1. 不干扰地等待 `0723-1551 TC OFF` 完成。
-2. 完成后统计并验收 TC OFF 的精度与系统性能指标。
-3. 提交当前 TC ON 工作站代码并同步 Jetson。
-4. 先运行 10–30 个新代码 TC OFF episode，验证与 `0723-1551` 等价。
-5. 再运行相同 episode 的 TC ON，检查状态机和局部导航效果。
-6. 通过后扩展到 100 个配对 episode；达到有效性门槛后才运行完整 1418 条 TC ON。
-7. 最后运行正式 Stop-and-go，形成三组最终论文结果。
+每完成一次正式或小规模实验，在本文档末尾追加以下记录：
+
+```text
+Experiment:
+Run ID:
+Date:
+Code commit:
+Mode:
+Dataset / episode subset:
+Output directory:
+Key parameters:
+Completion:
+Retries / failures:
+
+Accuracy:
+SR:
+OSR:
+CR:
+Avg waypoints:
+Avg NE:
+
+System:
+Avg T_dec:
+Avg T_action:
+Avg time shift:
+Avg state drift:
+Avg episode e2e latency:
+
+Finding:
+Known issue:
+Reviewer decision:
+Next action:
+```
+
+## 9. 当前下一步
+
+当前只执行以下任务：
+
+```text
+等待正式 TC OFF 0723-1551 完成
+→ 验收并统计 TC OFF
+→ Reviewer checkpoint A
+→ 运行正式 Stop-and-go
+→ 验收并计算精度上限
+→ Reviewer checkpoint B
+```
+
+在 Reviewer checkpoint B 完成前，不启动完整 TC ON。
