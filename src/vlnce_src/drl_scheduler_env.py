@@ -250,7 +250,7 @@ class DRLSchedulerEnv(gym.Env):
         self.max_waypoints = int(max_waypoints or args.maxWaypoints)
         self.deterministic_eval = bool(deterministic_eval)
         self.action_space = spaces.Discrete(4)
-        self.observation_space = spaces.Box(low=-10.0, high=10.0, shape=(7,), dtype=np.float32)
+        self.observation_space = spaces.Box(low=-10.0, high=10.0, shape=(8,), dtype=np.float32)
 
         os.makedirs(os.path.dirname(self.profile_log_path), exist_ok=True)
         self.profile_fp = open(self.profile_log_path, "w", encoding="utf-8")
@@ -272,6 +272,7 @@ class DRLSchedulerEnv(gym.Env):
         self.last_observed_bandwidth_bps = float(self.bandwidth_trace.next_bandwidth_bps())
         self.closed = False
         self._safety_last_threshold: Optional[float] = None
+        self._last_request_step: int = 0  # step counter of last VLM request submission
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None):
         super().reset(seed=seed)
@@ -417,11 +418,19 @@ class DRLSchedulerEnv(gym.Env):
             if self.clock.enabled
             else float((time.perf_counter() - step_start) * 1000.0)
         )
+        # CONTINUE_REQUEST runs DINO while flying; the DINO time should not
+        # inflate the time penalty because the drone isn't idling.
+        dino_overhead_ms = 0.0
+        if not motion_stop:
+            dino_overhead_ms += float(extra.get("request_obs_latency_ms", 0) or 0)
+            dino_overhead_ms += float(extra.get("request_dino_latency_ms", 0) or 0)
+        effective_time_drift_ms = max(0.0, time_drift_delta_ms - dino_overhead_ms)
         reward, reward_parts = self._compute_reward(
             elapsed_ms=elapsed_ms,
+            dino_overhead_ms=dino_overhead_ms,
             ne_progress_m=ne_progress_m,
             state_drift_delta_m=state_drift_delta_m,
-            time_drift_delta_ms=time_drift_delta_ms,
+            time_drift_delta_ms=effective_time_drift_ms,
             request_edge=request_bw is not None,
             terminated=terminated,
             terminal_reason=terminal_reason,
@@ -584,6 +593,7 @@ class DRLSchedulerEnv(gym.Env):
         extra["request_dino_latency_ms"] = dino_ms
         if snapshot is not None:
             self.planner.submit(snapshot, bandwidth_bps)
+            self._last_request_step = self.scheduler_step_count
             extra["submitted_request_id"] = int(snapshot.request_id)
 
     def _stop_and_request(self, bandwidth_bps: float, extra: Dict[str, Any]) -> None:
@@ -603,6 +613,7 @@ class DRLSchedulerEnv(gym.Env):
             )
             return
         self.planner.submit(snapshot, bandwidth_bps)
+        self._last_request_step = self.scheduler_step_count
         result = self._wait_for_request_result(snapshot.request_id, extra)
         self._apply_result(result)
         extra["submitted_request_id"] = int(snapshot.request_id)
@@ -678,11 +689,16 @@ class DRLSchedulerEnv(gym.Env):
         terminal_reason: Optional[str],
         action_illegal: bool = False,
         oracle_success: bool = False,
+        dino_overhead_ms: float = 0.0,
     ) -> Tuple[float, Dict[str, float]]:
         ne_progress_reward = float(args.scheduler_ne_progress_weight) * float(
             np.clip(ne_progress_m / float(args.scheduler_ne_norm_m), -1.0, 1.0)
         )
-        time_penalty = -float(args.scheduler_time_weight) * elapsed_ms / float(args.scheduler_time_norm_ms)
+        # DINO/obs time incurred by a REQUEST while the drone is flying
+        # (CONTINUE) should not count against the time penalty — the drone
+        # isn't hovering, so it's not "wasting" time.
+        effective_ms = max(0.0, elapsed_ms - dino_overhead_ms)
+        time_penalty = -float(args.scheduler_time_weight) * effective_ms / float(args.scheduler_time_norm_ms)
         drift_penalty = -float(args.scheduler_drift_weight) * state_drift_delta_m / float(args.scheduler_drift_norm_m)
         time_drift_penalty = -float(args.scheduler_time_drift_weight) * time_drift_delta_ms / float(args.scheduler_time_drift_norm_ms)
         request_penalty = -float(args.scheduler_request_weight) if request_edge else 0.0
@@ -726,6 +742,7 @@ class DRLSchedulerEnv(gym.Env):
                 self._current_drift_m() / float(args.scheduler_drift_norm_m or STATE_DRIFT_NORM_M),
                 self._current_time_drift_ms() / float(args.scheduler_time_drift_norm_ms or TIME_DRIFT_NORM_MS),
                 (cur_ne / ne_norm) if cur_ne is not None else 10.0,  # Critic-only: NE
+                min(float(self.scheduler_step_count - self._last_request_step), 10.0) / 10.0,  # request age
             ],
             dtype=np.float32,
         )

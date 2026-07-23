@@ -23,6 +23,7 @@ from src.vlnce_src.continue_eval import (
     _waypoint_segment_stats,
 )
 from src.vlnce_src.dino_monitor_online import DinoMonitor
+from src.vlnce_src.drl_ac_policy import SplitACPolicy  # required for PPO.load deserialization
 from src.vlnce_src.drl_scheduler_env import ACTION_NAMES, DRLSchedulerEnv, _metric_summary, _as_bool
 from src.vlnce_src.fast_eval_time import configure_fast_eval_output
 from utils.logger import logger

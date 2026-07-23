@@ -22,7 +22,7 @@ CUDA_VISIBLE_DEVICES=0 python -u $root_dir/src/vlnce_src/drl_scheduler_train.py 
     --scheduler_total_episodes 639 \
     --scheduler_total_timesteps 100000 \
     --scheduler_max_steps 800 \
-    --scheduler_gamma 0.999 \
+    --scheduler_gamma 0.995 \
     --scheduler_n_steps 128 \
     --scheduler_ne_norm_m 1.0 \
     --scheduler_ne_progress_weight 1.0 \

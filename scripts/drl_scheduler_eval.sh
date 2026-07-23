@@ -18,9 +18,9 @@ CUDA_VISIBLE_DEVICES=0 python -u $root_dir/src/vlnce_src/drl_scheduler_eval.py \
     --fast_eval True \
     --fast_eval_speedup 10 \
     --comm_trace_csv_path $root_dir/bandwidth/ucc4g_bandwidth_trace.csv \
-    --scheduler_model_path $root_dir/drl_train_0713-1452/scheduler_models/ppo_scheduler_20260713-145227-271281.zip \
+    --scheduler_model_path $root_dir/drl_train_0722-1254/scheduler_models/ppo_scheduler_20260722-125409-242489.zip \
     --dataset_path /HDD2/TravelUAV_dataset/TravelUAV_data/ \
-    --eval_save_path /code/TravelUAV/eval_drl_scheduler \
+    --eval_save_path /code/TravelUAV/eval_drl_$(date +%m%d-%H%M) \
     --model_path "$root_dir/Model/LLaMA-UAV/work_dirs/llama-uav-7b" \
     --model_base "$root_dir/Model/LLaMA-UAV/model_zoo/vicuna-7b-v1.5" \
     --vision_tower "$root_dir/Model/LLaMA-UAV/model_zoo/LAVIS/eva_vit_g.pth" \

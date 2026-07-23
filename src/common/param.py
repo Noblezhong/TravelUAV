@@ -65,6 +65,7 @@ class CommonArguments:
     scheduler_failure_penalty: float = field(default=10.0, metadata={"help": "terminal penalty for failure or maxWaypoints"})
     scheduler_illegal_action_penalty: float = field(default=5.0, metadata={"help": "penalty for choosing an illegal action in the current state"})
     scheduler_idle_wait_ms: float = field(default=100.0, metadata={"help": "small hover duration for STOP_NO_REQUEST when no request is in flight"})
+    scheduler_ent_coef: float = field(default=0.01, metadata={"help": "PPO entropy coefficient for exploration"})
 
     dagger_it: int = field(default=1)
     epochs: int = field(default=10)

@@ -93,7 +93,7 @@ def main():
         n_steps=int(args.scheduler_n_steps),
         batch_size=int(args.scheduler_batch_size),
         gamma=float(args.scheduler_gamma),
-        ent_coef=0.01,
+        ent_coef=float(args.scheduler_ent_coef),
         verbose=1,
         tensorboard_log=tb_dir,
         device="cpu",

@@ -22,7 +22,7 @@ class SplitACPolicy(ActorCriticPolicy):
     def _actor_obs(self, obs: torch.Tensor) -> torch.Tensor:
         """Return 7-dim tensor with NE (index 6) zeroed for the Actor."""
         out = obs.clone()
-        out[:, 6] = 0.0
+        out[:, 7] = 0.0
         return out
 
     def _critic_obs(self, obs: torch.Tensor) -> torch.Tensor:
