@@ -19,6 +19,7 @@ eval_output_com/
 eval_output_profile/
 eval_output_profile_jetson/
 eval_output_profile_continuous/
+eval_stop_go*/
 eval_pro_con_w*/
 eval_pro_con_com_w*/
 eval_pro_con_trim_w*/
