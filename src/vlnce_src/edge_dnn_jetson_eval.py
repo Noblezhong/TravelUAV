@@ -46,13 +46,27 @@ from src.vlnce_src.fast_eval_time import (
     configure_fast_eval_output,
 )
 from src.vlnce_src.trajcorr_runtime import (
+    COMPLETION_BUFFER_EXHAUSTED,
+    COMPLETION_GOAL_PASSED,
+    COMPLETION_GOAL_REACHED,
     ContinuousRequestCounter,
+    PHASE_NORMAL,
+    PHASE_TARGET_LOCK,
+    PHASE_WAIT_REFRESH,
     TRAJECTORY_CORRECTED,
     TRAJECTORY_ORIGINAL,
+    TargetLockLifecycle,
     select_trajectory_mode,
 )
 from utils.logger import logger
 from utils.utils import *
+
+TARGET_LOCK_GOAL_RADIUS_M = 0.5
+TARGET_LOCK_REQUEST_REASONS = {
+    COMPLETION_GOAL_REACHED: "correction_complete",
+    COMPLETION_GOAL_PASSED: "correction_passed_goal",
+    COMPLETION_BUFFER_EXHAUSTED: "correction_buffer_exhausted",
+}
 
 
 @dataclass
@@ -740,8 +754,29 @@ def eval(
                         active_traj_state_shift_m = 0.0
                         active_traj_time_shift_ms = 0.0
                         active_refine_obs_latency_ms = 0.0
+                        active_target_lock_dropped_pending = False
                         continuous_counter = ContinuousRequestCounter(request_interval=5)
+                        target_lock = TargetLockLifecycle(
+                            goal_radius_m=TARGET_LOCK_GOAL_RADIUS_M
+                        )
                         correction_threshold_m = float(args.trajcorr_state_shift_threshold_m)
+
+                        def result_enters_target_lock(
+                            result: EdgeCoarseResult,
+                        ) -> bool:
+                            decision = select_trajectory_mode(
+                                correction_enabled,
+                                result.observation_pose,
+                                state.current_sim_pose(),
+                                correction_threshold_m,
+                            )
+                            return decision.mode == TRAJECTORY_CORRECTED
+
+                        def drop_pending_request() -> bool:
+                            nonlocal pending_request
+                            dropped = pending_request is not None
+                            pending_request = None
+                            return dropped
 
                         def submit_pending_if_idle() -> bool:
                             nonlocal pending_request
@@ -834,6 +869,19 @@ def eval(
                                 if prepared is not None
                                 else action_delay_ms
                             )
+                            enters_target_lock = bool(
+                                prepared is not None
+                                and prepared.mode == TRAJECTORY_CORRECTED
+                            )
+                            target_lock_distance_m = (
+                                _point_delta(
+                                    result.coarse_goal_world,
+                                    state.current_sim_pose(),
+                                )
+                                if enters_target_lock
+                                and result.coarse_goal_world is not None
+                                else None
+                            )
                             result_record = {
                                 "record_type": "trajectory_result",
                                 "exec_step": int(exec_step),
@@ -871,6 +919,23 @@ def eval(
                                     else None
                                 ),
                                 "trajectory_mode": prepared.mode if prepared is not None else None,
+                                "execution_phase": (
+                                    PHASE_TARGET_LOCK
+                                    if enters_target_lock
+                                    else PHASE_NORMAL
+                                ),
+                                "target_lock_active": enters_target_lock,
+                                "target_lock_goal_world": (
+                                    copy.deepcopy(result.coarse_goal_world)
+                                    if enters_target_lock
+                                    else None
+                                ),
+                                "target_lock_distance_m": target_lock_distance_m,
+                                "continuous_counter_frozen": enters_target_lock,
+                                "target_lock_completion_reason": None,
+                                "dropped_pending_request": bool(
+                                    enters_target_lock and pending_request is not None
+                                ),
                                 "state_shift_at_apply_m": (
                                     float(coarse_state_shift_m)
                                 ),
@@ -935,15 +1000,59 @@ def eval(
                         def activate_trajectory(
                             result: EdgeCoarseResult,
                             prepared: Optional[PreparedTrajectory],
-                        ) -> bool:
+                        ) -> tuple[bool, Optional[str], bool]:
                             nonlocal active_coarse_result
                             nonlocal active_traj, active_index, active_dnn_profile, active_mode
                             nonlocal active_coarse_state_shift_m, active_coarse_time_shift_ms
                             nonlocal active_traj_state_shift_m, active_traj_time_shift_ms
                             nonlocal active_refine_obs_latency_ms
+                            nonlocal active_target_lock_dropped_pending
                             if prepared is None:
-                                return False
-                            if not _has_executable_waypoints(prepared.waypoints, min_waypoints=7):
+                                return False, None, False
+
+                            completion_reason = None
+                            dropped_pending = False
+                            min_waypoints = 7
+                            if prepared.mode == TRAJECTORY_CORRECTED:
+                                dropped_pending = drop_pending_request()
+                                active_target_lock_dropped_pending = dropped_pending
+                                completion_reason = target_lock.begin(
+                                    result.observation_pose,
+                                    state.current_sim_pose(),
+                                    result.coarse_goal_world,
+                                )
+                                raw_waypoint_count = len(prepared.waypoints)
+                                if completion_reason is None:
+                                    prepared.waypoints = target_lock.filter_waypoints(
+                                        prepared.waypoints,
+                                        state.current_sim_pose(),
+                                    )
+                                    if not prepared.waypoints:
+                                        completion_reason = (
+                                            target_lock.mark_buffer_exhausted()
+                                        )
+                                else:
+                                    prepared.waypoints = []
+                                prepared.profile.update(
+                                    {
+                                        "target_lock_raw_waypoint_count": raw_waypoint_count,
+                                        "target_lock_filtered_waypoint_count": len(
+                                            prepared.waypoints
+                                        ),
+                                    }
+                                )
+                                min_waypoints = 1
+                            else:
+                                target_lock.resume_normal()
+                                active_target_lock_dropped_pending = False
+
+                            if (
+                                completion_reason is None
+                                and not _has_executable_waypoints(
+                                    prepared.waypoints,
+                                    min_waypoints=min_waypoints,
+                                )
+                            ):
                                 state.dones[0] = True
                                 invalid_record = {
                                     "record_type": "dnn_invalid",
@@ -959,7 +1068,7 @@ def eval(
                                 }
                                 _write_jsonl_line(profile_fp, invalid_record)
                                 summary_records.append(invalid_record)
-                                return False
+                                return False, None, dropped_pending
                             active_coarse_result = result
                             active_traj = prepared.waypoints
                             active_index = 0
@@ -970,7 +1079,72 @@ def eval(
                             active_traj_state_shift_m = prepared.traj_state_shift_m
                             active_traj_time_shift_ms = prepared.traj_time_shift_ms
                             active_refine_obs_latency_ms = prepared.observation_latency_ms
-                            return True
+                            return True, completion_reason, dropped_pending
+
+                        def complete_target_lock(
+                            completion_reason: str,
+                            dropped_pending: bool = False,
+                        ) -> tuple[float, Optional[int], bool]:
+                            nonlocal active_traj, active_index
+                            nonlocal active_target_lock_dropped_pending
+                            request_reason = TARGET_LOCK_REQUEST_REASONS.get(
+                                completion_reason
+                            )
+                            if request_reason is None:
+                                raise ValueError(
+                                    f"unknown target-lock completion reason: {completion_reason}"
+                                )
+
+                            dropped_pending = (
+                                drop_pending_request()
+                                or dropped_pending
+                                or active_target_lock_dropped_pending
+                            )
+                            active_target_lock_dropped_pending = False
+                            active_traj = []
+                            active_index = 0
+                            observation_latency_ms, triggered_request_id = schedule_request(
+                                request_reason,
+                                refresh=True,
+                            )
+                            if triggered_request_id is not None:
+                                continuous_counter.mark_request_submitted()
+
+                            transition_record = {
+                                "record_type": "target_lock_transition",
+                                "exec_step": int(exec_step),
+                                "seq_names": [env_batchs[0]["seq_name"]],
+                                "map_names": [env_batchs[0]["map_name"]],
+                                "execution_phase": PHASE_WAIT_REFRESH,
+                                "target_lock_active": False,
+                                "target_lock_goal_world": copy.deepcopy(
+                                    target_lock.goal_world
+                                ),
+                                "target_lock_distance_m": (
+                                    target_lock.distance_to_goal(
+                                        state.current_sim_pose()
+                                    )
+                                ),
+                                "continuous_counter_frozen": False,
+                                "target_lock_completion_reason": completion_reason,
+                                "dropped_pending_request": bool(dropped_pending),
+                                "request_trigger_reason": request_reason,
+                                "triggered_request_id": triggered_request_id,
+                                "request_observation_latency_ms": float(
+                                    observation_latency_ms
+                                ),
+                                "logical_elapsed_ms": float(episode_clock.now_ms),
+                                "success": bool(state.success),
+                                "collision": bool(state.collisions[0]),
+                                "done": bool(state.dones[0]),
+                            }
+                            _write_jsonl_line(profile_fp, transition_record)
+                            summary_records.append(transition_record)
+                            return (
+                                observation_latency_ms,
+                                triggered_request_id,
+                                dropped_pending,
+                            )
 
                         # Cold start is the only blocking request before an active trajectory exists.
                         state.record_request_ne()
@@ -993,13 +1167,33 @@ def eval(
                         ):
                             new_result = edge_client.poll_result()
                             if new_result is not None:
-                                submit_pending_if_idle()
+                                if not result_enters_target_lock(new_result):
+                                    submit_pending_if_idle()
                                 prepared = consume_result(new_result)
                                 if state.dones[0]:
                                     break
-                                activate_trajectory(new_result, prepared)
+                                activated, completion_reason, dropped_pending = (
+                                    activate_trajectory(new_result, prepared)
+                                )
+                                if not activated:
+                                    continue
+                                if active_mode == TRAJECTORY_ORIGINAL:
+                                    submit_pending_if_idle()
+                                elif completion_reason is not None:
+                                    complete_target_lock(
+                                        completion_reason,
+                                        dropped_pending=dropped_pending,
+                                    )
+                                    if state.dones[0]:
+                                        break
 
                             if active_coarse_result is None or active_index >= len(active_traj):
+                                if target_lock.active:
+                                    complete_target_lock(
+                                        target_lock.mark_buffer_exhausted()
+                                    )
+                                    if state.dones[0]:
+                                        break
                                 submit_pending_if_idle()
                                 if not edge_client.has_inflight():
                                     raise RuntimeError(
@@ -1020,17 +1214,40 @@ def eval(
                                 _write_jsonl_line(profile_fp, wait_record)
                                 summary_records.append(wait_record)
                                 waited_result = edge_client.wait_result()
-                                submit_pending_if_idle()
+                                if not result_enters_target_lock(waited_result):
+                                    submit_pending_if_idle()
                                 prepared = consume_result(waited_result)
                                 if state.dones[0]:
                                     break
-                                if not activate_trajectory(waited_result, prepared):
+                                activated, completion_reason, dropped_pending = (
+                                    activate_trajectory(waited_result, prepared)
+                                )
+                                if not activated:
+                                    continue
+                                if active_mode == TRAJECTORY_ORIGINAL:
+                                    submit_pending_if_idle()
+                                elif completion_reason is not None:
+                                    complete_target_lock(
+                                        completion_reason,
+                                        dropped_pending=dropped_pending,
+                                    )
+                                    if state.dones[0]:
+                                        break
                                     continue
 
                             current_index = active_index
                             current_chunk = active_traj[current_index : current_index + 1]
                             if not current_chunk:
                                 continue
+                            execution_phase = (
+                                PHASE_TARGET_LOCK
+                                if target_lock.active
+                                else PHASE_NORMAL
+                            )
+                            counter_frozen = target_lock.counter_frozen
+                            target_lock_goal_world = copy.deepcopy(
+                                target_lock.goal_world
+                            )
                             action_start = time.perf_counter()
                             eval_env.makeActionsChunk([current_chunk], target_idx=1)
                             measured_action_wall_ms = (time.perf_counter() - action_start) * 1000.0
@@ -1045,19 +1262,39 @@ def eval(
                             )
                             active_index += 1
                             exec_step += 1
-                            execution_phase = (
-                                "corrected"
-                                if active_mode == TRAJECTORY_CORRECTED
-                                else "original"
+                            target_lock_distance_m = target_lock.distance_to_goal(
+                                state.current_sim_pose()
                             )
-                            request_reason = (
-                                "continuous_w5"
-                                if continuous_counter.mark_normal_execution()
-                                else None
-                            )
+                            target_lock_completion_reason = None
+                            request_reason = None
                             request_obs_latency_ms = 0.0
                             triggered_request_id = None
-                            if request_reason is not None:
+                            dropped_pending_for_action = False
+
+                            if counter_frozen:
+                                target_lock_completion_reason = target_lock.evaluate(
+                                    state.current_sim_pose()
+                                )
+                                if (
+                                    target_lock_completion_reason is None
+                                    and active_index >= len(active_traj)
+                                ):
+                                    target_lock_completion_reason = (
+                                        target_lock.mark_buffer_exhausted()
+                                    )
+                                if target_lock_completion_reason is not None:
+                                    request_reason = TARGET_LOCK_REQUEST_REASONS[
+                                        target_lock_completion_reason
+                                    ]
+                                    (
+                                        request_obs_latency_ms,
+                                        triggered_request_id,
+                                        dropped_pending_for_action,
+                                    ) = complete_target_lock(
+                                        target_lock_completion_reason
+                                    )
+                            elif continuous_counter.mark_execution(frozen=False):
+                                request_reason = "continuous_w5"
                                 request_obs_latency_ms, triggered_request_id = schedule_request(
                                     request_reason, refresh=True
                                 )
@@ -1096,6 +1333,16 @@ def eval(
                                 "triggered_request_id": triggered_request_id,
                                 "execution_phase": execution_phase,
                                 "continuous_waypoints_since_request": int(continuous_counter.count),
+                                "target_lock_active": bool(counter_frozen),
+                                "target_lock_goal_world": target_lock_goal_world,
+                                "target_lock_distance_m": target_lock_distance_m,
+                                "continuous_counter_frozen": bool(counter_frozen),
+                                "target_lock_completion_reason": (
+                                    target_lock_completion_reason
+                                ),
+                                "dropped_pending_request": bool(
+                                    dropped_pending_for_action
+                                ),
                                 "request_trigger_reason": request_reason,
                                 "airsim_action_latency_ms": float(action_times["airsim_action_latency_ms"]),
                                 "action_wall_time_ms": float(action_times["action_wall_time_ms"]),
@@ -1205,6 +1452,11 @@ def eval(
     episode_records = [item for item in summary_records if item.get("record_type") == "episode_end"]
     decision_records = [
         item for item in summary_records if item.get("record_type") == "trajectory_result"
+    ]
+    target_lock_records = [
+        item
+        for item in summary_records
+        if item.get("record_type") == "target_lock_transition"
     ]
     mode_counts = {
         mode: sum(item.get("trajectory_mode") == mode for item in decision_records)
@@ -1320,11 +1572,41 @@ def eval(
             for reason in (
                 "cold_start",
                 "continuous_w5",
+                "correction_complete",
+                "correction_passed_goal",
+                "correction_buffer_exhausted",
             )
         },
+        "target_lock_completion_counts": {
+            reason: sum(
+                item.get("target_lock_completion_reason") == reason
+                for item in target_lock_records
+            )
+            for reason in (
+                COMPLETION_GOAL_REACHED,
+                COMPLETION_GOAL_PASSED,
+                COMPLETION_BUFFER_EXHAUSTED,
+            )
+        },
+        "target_lock_distance_m": _metric_summary(
+            [
+                item.get("target_lock_distance_m")
+                for item in execution_records
+                if item.get("target_lock_active")
+            ]
+        ),
+        "target_lock_execution_steps": sum(
+            item.get("execution_phase") == PHASE_TARGET_LOCK
+            for item in execution_records
+        ),
+        "dropped_pending_request_count": sum(
+            bool(item.get("dropped_pending_request"))
+            for item in target_lock_records
+        ),
         "trajcorr_mode": trajcorr_mode,
         "max_control_steps": int(args.max_control_steps),
         "correction_threshold_m": float(args.trajcorr_state_shift_threshold_m),
+        "target_lock_goal_radius_m": TARGET_LOCK_GOAL_RADIUS_M,
         "num_decision_records": len(decision_records),
         "num_episode_records": len(episode_records),
         "num_records": len(summary_records),
