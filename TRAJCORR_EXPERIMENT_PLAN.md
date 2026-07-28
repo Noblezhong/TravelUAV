@@ -49,18 +49,20 @@
 - [x] 正式 TC OFF 完成 1418 个 episode，并完成第一轮指标统计。
 - [x] Reviewer checkpoint A：TC OFF 可作为关闭轨迹修正的正式异步基线。
 - [x] 在 5090 工作站启动正式 Stop-and-go：`0728-1740`。
+- [x] 在 4090 + Jetson 完成 TC ON 跨端 smoke test，并清理临时输出。
+- [x] 按用户决定启动正式 TC ON：`0728-1810`。
 
 ### 正在进行
 
 - [ ] 正式 Stop-and-go 完整运行 1418 个 episode。
+- [ ] 正式 TC ON 完整运行 1418 个 episode。
 
 ### 下一步唯一任务
 
-- [ ] Stop-and-go 完成后按 TC OFF 的统一口径统计并执行 Reviewer checkpoint B。
+- [ ] Stop-and-go 与 TC ON 完成后，按 TC OFF 的统一口径统计并执行 Reviewer checkpoint B。
 
 ### 暂时不要做
 
-- [ ] 不启动完整 TC ON。
 - [ ] 不根据旧 Stop-and-go 或旧 Continuous 结果计算正式恢复率。
 - [ ] 不调整 TC ON 阈值、目标锁定或请求逻辑，直到 TC OFF 与正式 Stop-and-go 的结果被 reviewer 审查。
 
@@ -151,17 +153,27 @@
 - tmux：
   `srv` 运行 AirSim Server，`eval` 运行 Stop-and-go evaluator
 
-该实验是正式同步精度上限。运行期间不修改评估边界，不启动 TC ON。
+该实验是正式同步精度上限。运行期间不修改评估边界。
 
 ### 3.3 已清理的旧实验
 
 `0723-1301` 使用旧的 200 控制步上限，只是 pilot，已删除，不进入任何正式统计。
 
-### 3.4 TC ON 已完成静态修正，尚未进入正式运行
+### 3.4 TC ON 已完成 smoke test，正式评估正在运行
 
-工作站代码已经加入目标锁定状态机、请求冻结、pending request 清理和回头 waypoint 过滤，并通过静态检查及单元测试。代码和本文档已提交为 `251dcd4`，工作站、GitHub 和 Jetson 磁盘仓库已完成同步，但尚未启动 AirSim smoke test。
+工作站代码已经加入目标锁定状态机、请求冻结、pending request 清理和回头 waypoint 过滤。Jetson 与工作站关键执行文件哈希一致。由于 5090 与 4090 + Jetson 可独立运行，用户决定在 Stop-and-go 尚未完成时并行推进 TC ON；这不改变三组的统一评估边界。
 
-TC ON 只有在 `0723-1551` 完成后，通过小规模配对运行验证，才能进入正式 1418 条评估。
+Smoke test 使用 3 条具有 `state shift >= 2.5m` 的 TC OFF episode，确认：3 条均正常终止、控制步未超过 1000、Fast Eval x10 生效、`corrected=19`、`target_lock=43`，且目标锁定阶段没有触发普通 `continuous_w5` 请求。测试输出、日志、临时 JSON 和 manifest 已清理。
+
+正式 TC ON：
+
+- Run ID：`0728-1810`
+- Jetson tmux：`tc_on_full`
+- 输出目录：`/home/zt/traveluav_eval_shared/eval_trajcorr_on_0728-1810_fast_x10`
+- 4090：AirSim Server `25000`，Edge VLM Server `26000`
+- 配置：`trajcorr_mode=on`、`max_control_steps=1000`、Fast Eval `x10`
+
+正式 TC ON 已进入第一个 AirSim scene 并开始写 profile；首个 episode 已结束，后续 episode 正在运行。
 
 正式 TC ON 必须同时包含：
 
@@ -462,9 +474,9 @@ Next action:
 当前只执行以下任务：
 
 ```text
-等待正式 Stop-and-go 0728-1740 完成
-→ 统计并验收 Stop-and-go
+等待正式 Stop-and-go 0728-1740 与 TC ON 0728-1810 完成
+→ 分别统计并验收两组结果
 → Reviewer checkpoint B
 ```
 
-在 Reviewer checkpoint B 完成前，不启动完整 TC ON。
+在 Reviewer checkpoint B 完成前，不调整 TC ON 策略或统一评估边界。
