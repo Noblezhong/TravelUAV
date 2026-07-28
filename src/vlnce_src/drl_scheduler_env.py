@@ -247,7 +247,7 @@ class DRLSchedulerEnv(gym.Env):
         self.profile_log_path = profile_log_path
         self.summary_path = summary_path
         self.enable_comm_delay = bool(enable_comm_delay)
-        self.max_waypoints = int(max_waypoints or args.maxWaypoints)
+        self.max_waypoints = int(max_waypoints or args.max_control_steps)
         self.deterministic_eval = bool(deterministic_eval)
         self.action_space = spaces.Discrete(4)
         self.observation_space = spaces.Box(low=-10.0, high=10.0, shape=(8,), dtype=np.float32)

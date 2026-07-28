@@ -13,7 +13,7 @@ CUDA_VISIBLE_DEVICES=0 python -u $root_dir/src/vlnce_src/drl_scheduler_train.py 
     --batchSize 1 \
     --always_help True \
     --use_gt True \
-    --maxWaypoints 200 \
+    --max_control_steps 1000 \
     --max_episodes_per_scene 80 \
     --enable_comm_delay $enable_comm_delay \
     --fast_eval True \
@@ -21,7 +21,7 @@ CUDA_VISIBLE_DEVICES=0 python -u $root_dir/src/vlnce_src/drl_scheduler_train.py 
     --comm_trace_csv_path $root_dir/bandwidth/ucc4g_bandwidth_trace.csv \
     --scheduler_total_episodes 639 \
     --scheduler_total_timesteps 100000 \
-    --scheduler_max_steps 800 \
+    --scheduler_max_steps 2000 \
     --scheduler_gamma 0.995 \
     --scheduler_n_steps 128 \
     --scheduler_ne_norm_m 1.0 \

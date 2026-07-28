@@ -1019,7 +1019,7 @@ def eval(
                             current_pose=current_pose,
                         )
 
-                        while not state.dones[0] and control_step < int(args.maxWaypoints):
+                        while not state.dones[0] and control_step < int(args.max_control_steps):
                             applied_result = planner.poll_result()
                             dino_latency_ms = 0.0
                             trajectory_switch_applied = False

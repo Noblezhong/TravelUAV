@@ -69,7 +69,7 @@ def main():
         profile_log_path=os.path.join(profile_dir, f"drl_eval_{args.make_dir_time}.jsonl"),
         summary_path=os.path.join(profile_dir, f"drl_eval_{args.make_dir_time}_summary.json"),
         enable_comm_delay=enable_comm_delay,
-        max_waypoints=args.maxWaypoints,
+        max_waypoints=args.max_control_steps,
         deterministic_eval=True,
     )
     scheduler = PPO.load(args.scheduler_model_path, env=None, device="cuda" if torch.cuda.is_available() else "cpu")
