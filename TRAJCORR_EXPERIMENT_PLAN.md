@@ -46,14 +46,15 @@
 - [x] 实现 TC ON 的 state-shift gate、目标锁定、请求冻结和回头 waypoint 过滤。
 - [x] TC ON 代码提交为 `251dcd4`，静态与单元测试通过。
 - [x] 启动正式 TC OFF：`0723-1551`。
+- [x] 正式 TC OFF 完成 1418 个 episode，并完成第一轮指标统计。
 
 ### 正在进行
 
-- [ ] 正式 TC OFF 完整运行 1418 个 episode。
+- [ ] Reviewer checkpoint A：验收 TC OFF 的运行边界与统计口径。
 
 ### 下一步唯一任务
 
-- [ ] TC OFF 完成后，先验收 TC OFF，再运行对齐后的正式 Stop-and-go，得到精度上限。
+- [ ] Reviewer 接受 TC OFF 后，运行对齐后的正式 Stop-and-go，得到精度上限。
 
 ### 暂时不要做
 
@@ -113,7 +114,7 @@
 
 ## 3. 当前状态
 
-### 3.1 正式 TC OFF 正在运行
+### 3.1 正式 TC OFF 已完成
 
 - Run ID：`0723-1551`
 - 工作站结果目录：
@@ -121,9 +122,20 @@
 - 配置：
   `trajcorr_mode=off`、`w=5`、`max_control_steps=1000`、Fast Eval `x10`
 
-该实验是统一评估口径后的正式 TC OFF 基线。运行期间不得修改评估代码、终止条件或通信逻辑。
+该实验使用启动时加载的提交 `d42637f`，已完成 `1418/1418` 个 episode，无残留评估进程。profile 包含 1418 条唯一 `episode_end` 记录。
 
-Jetson 磁盘仓库已经同步到 TC ON 提交 `251dcd4`，但正在运行的 TC OFF Python 进程仍使用启动时加载的旧提交 `d42637f`。同步没有重启 evaluator，也没有改变当前 TC OFF 的运行逻辑。该进程结束前不得重启或续跑到新代码中。
+| 指标 | TC OFF |
+|---|---:|
+| SR | 2.96% |
+| OSR | 4.09% |
+| CR | 66.93% |
+| Avg waypoints | 197.69 |
+| Avg NE | 183.85 m |
+| Avg T_dec | 3694.84 ms |
+| Avg T_action | 2102.88 ms |
+| Avg time shift | 6535.88 ms |
+| Avg state drift | 3.47 m |
+| Avg episode e2e latency | 523.37 s |
 
 ### 3.2 已清理的旧实验
 
@@ -182,12 +194,12 @@ TC ON 只有在 `0723-1551` 完成后，通过小规模配对运行验证，才�
 
 ### 阶段一：完成并验收 TC OFF
 
-- [ ] 等待 `0723-1551` 完成 1418 个 episode。
-- [ ] 检查所有 episode 均有唯一终止记录，无缺失或重复。
-- [ ] 检查控制步不超过 1000，重试 episode 最终正确落盘。
-- [ ] 统计导航精度：
+- [x] 等待 `0723-1551` 完成 1418 个 episode。
+- [x] 检查所有 episode 均有唯一终止记录，无缺失或重复。
+- [x] 检查控制步不超过 1000；22 条达到预算上限，所有 episode 均唯一落盘。
+- [x] 统计导航精度：
   `SR / OSR / CR / Avg waypoints / Avg NE`。
-- [ ] 统计系统性能：
+- [x] 统计系统性能：
   `Avg T_dec / Avg T_action / Avg time shift / Avg state drift / Avg episode e2e latency`。
 - [ ] 保存 episode 列表、带宽映射、代码 commit 和 Fast Eval manifest，作为 TC ON 与 Stop-and-go 的共同实验配置。
 
@@ -434,9 +446,7 @@ Next action:
 当前只执行以下任务：
 
 ```text
-等待正式 TC OFF 0723-1551 完成
-→ 验收并统计 TC OFF
-→ Reviewer checkpoint A
+Reviewer checkpoint A：验收 TC OFF
 → 运行正式 Stop-and-go
 → 验收并计算精度上限
 → Reviewer checkpoint B
