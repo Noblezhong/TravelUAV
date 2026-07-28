@@ -47,14 +47,16 @@
 - [x] TC ON 代码提交为 `251dcd4`，静态与单元测试通过。
 - [x] 启动正式 TC OFF：`0723-1551`。
 - [x] 正式 TC OFF 完成 1418 个 episode，并完成第一轮指标统计。
+- [x] Reviewer checkpoint A：TC OFF 可作为关闭轨迹修正的正式异步基线。
+- [x] 在 5090 工作站启动正式 Stop-and-go：`0728-1740`。
 
 ### 正在进行
 
-- [ ] Reviewer checkpoint A：验收 TC OFF 的运行边界与统计口径。
+- [ ] 正式 Stop-and-go 完整运行 1418 个 episode。
 
 ### 下一步唯一任务
 
-- [ ] Reviewer 接受 TC OFF 后，运行对齐后的正式 Stop-and-go，得到精度上限。
+- [ ] Stop-and-go 完成后按 TC OFF 的统一口径统计并执行 Reviewer checkpoint B。
 
 ### 暂时不要做
 
@@ -137,11 +139,25 @@
 | Avg state drift | 3.47 m |
 | Avg episode e2e latency | 523.37 s |
 
-### 3.2 已清理的旧实验
+### 3.2 正式 Stop-and-go 正在运行
+
+- 设备：5090 工作站 `192.168.105.9`
+- Run ID：`0728-1740`
+- 结果目录：
+  `/code/TravelUAV/eval_stop_go_0728-1740_fast_x10`
+- 代码提交：`20fd509`
+- 配置：
+  `maxWaypoints=200`、Fast Eval `x10`、通信时延开启
+- tmux：
+  `srv` 运行 AirSim Server，`eval` 运行 Stop-and-go evaluator
+
+该实验是正式同步精度上限。运行期间不修改评估边界，不启动 TC ON。
+
+### 3.3 已清理的旧实验
 
 `0723-1301` 使用旧的 200 控制步上限，只是 pilot，已删除，不进入任何正式统计。
 
-### 3.3 TC ON 已完成静态修正，尚未进入正式运行
+### 3.4 TC ON 已完成静态修正，尚未进入正式运行
 
 工作站代码已经加入目标锁定状态机、请求冻结、pending request 清理和回头 waypoint 过滤，并通过静态检查及单元测试。代码和本文档已提交为 `251dcd4`，工作站、GitHub 和 Jetson 磁盘仓库已完成同步，但尚未启动 AirSim smoke test。
 
@@ -153,7 +169,7 @@ TC ON 只有在 `0723-1551` 完成后，通过小规模配对运行验证，才�
 2. state shift 未超过阈值时保持普通 Continuous `w=5`；超过阈值后冻结请求计数，完成旧 coarse goal 的目标锁定后再恢复 `w=5`。
 3. 根据当前位姿过滤已越过的目标和回头 waypoint，禁止追赶已经失效的后方点。
 
-### 3.4 本轮 TC ON 已实现的具体行为
+### 3.5 本轮 TC ON 已实现的具体行为
 
 - Gate：`state shift < 2.5m` 使用原始轨迹；`state shift >= 2.5m` 进入目标锁定。
 - 状态机：`NORMAL / TARGET_LOCK / WAIT_REFRESH`。
@@ -446,9 +462,8 @@ Next action:
 当前只执行以下任务：
 
 ```text
-Reviewer checkpoint A：验收 TC OFF
-→ 运行正式 Stop-and-go
-→ 验收并计算精度上限
+等待正式 Stop-and-go 0728-1740 完成
+→ 统计并验收 Stop-and-go
 → Reviewer checkpoint B
 ```
 
