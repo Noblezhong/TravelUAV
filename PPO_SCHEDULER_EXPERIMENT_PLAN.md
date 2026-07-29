@@ -1,6 +1,6 @@
 # PPO Scheduler 正式实验计划
 
-> 最近更新：2026-07-29（Stop-and-go 73%，预计今晚 ~23 点完成）
+> 最近更新：2026-07-29（Stop-and-go 正式评估完成；下一步为 Continuous 终止同步预检）
 >
 > PPO Scheduler 代码提交：`20fd509`
 >
@@ -52,14 +52,18 @@
 - [x] 四个评估脚本全部对齐（eval.sh, continue_eval.sh, rule_eval.sh, drl_scheduler_eval.sh）
 - [x] 重启后 AirSim Server 启动方法已记录
 - [x] fast_eval 逻辑屏障验证：PPO Scheduler 环境 `poll_result` 有 `ready_logical_ms` 屏障，x10 与 x1 逻辑等价
+- [x] **Stop-and-go 正式评估 `0728-1740` 完成 1418/1418**：SR=50.21%，OSR=64.81%，collision=42.03%，mean E2E=410.67s
+- [x] Stop 与 PPO 完成 1418-episode 配对边界检查：PPO 仅快 0.82%，bootstrap 95% CI 跨 0，且 SR/OSR/CR/NE 均更差；当前不能宣称 C1 已成立
 
 ### 正在进行
 
-- [ ] **Stop-and-go 正式评估** `0728-1740`：1037/1418（73.1%），运行 17h，快照 SR=52.3%，OSR=66.2%，预计今晚 ~23 点完成。
+- [ ] 无 scheduler 正式评估进程。另一个会话正在修改 `hybrid_eval.py`，不得覆盖或混入 Continuous 修复。
 
 ### 下一步
 
-- [ ] Stop-and-go 完成后，立即启动 **Continuous w=5 评估**（`scripts/continue_eval.sh`）
+- [ ] 在 `continue_eval.py` 每次 `makeActionsChunk` 后同步 simulator collision/done/success 状态，使终止语义与 PPO evaluator 一致
+- [ ] 使用独立输出目录运行 5–10 episode smoke test，确认 trace 按 `seq_name` reset、碰撞后不继续飞行、Fast Eval manifest 和 episode-end 完整
+- [ ] smoke 通过后启动 **Continuous w=5 正式评估**（`scripts/continue_eval.sh`，1418 episodes）
 - [ ] 三组数据齐后（Stop-and-go + PPO + Continuous），分析 PPO 的精度-时延 Pareto 位置
 - [ ] 之后按需跑 Rule-based
 
@@ -164,16 +168,23 @@ DNN 硬件：主对比四组 DNN 全部在本地 5090。TC OFF（Jetson DNN）�
 - 配置：确定性推理、Fast Eval `x10`、`max_control_steps=1000`
 - 结果：见下方实验记录
 
-### 3.3 Stop-and-go 正式评估：🔄 运行中
+### 3.3 Stop-and-go 正式评估：✅ 已完成
 
 - Run ID：`0728-1740`
 - 结果目录：`/code/TravelUAV/eval_stop_go_0728-1740_fast_x10`
 - 配置：Fast Eval `x10`、`maxWaypoints=200`（→ 1000 waypoints）
-- 快照：SR=56.5%，预计 7/30 下午完成
+- 完整性：1418/1418，episode ID 全唯一，无缺失或重复
+- SR：50.21%（712/1418）
+- OSR：64.81%（919/1418）
+- Collision：42.03%（596/1418）
+- Mean final NE：66.22m
+- Mean E2E：410.67s（logical time；median 346.55s，p95 986.68s）
+- Mean executed waypoints：208.43
+- Reviewer：通过共享同步参照验收；现有 PPO 相对 Stop 未证明有效 trade-off，C1 仍需 PPO vs Continuous 决定
 
 ### 3.4 基线状态
 
-- **Continuous w=5**：`scripts/continue_eval.sh` 已对齐修复，Stop-and-go 完成后立即启动。
+- **Continuous w=5**：trace reset 和控制预算已对齐；正式运行前仍需补齐每次 waypoint 后的 simulator 终止状态同步，并通过 5–10 episode smoke。
 - **Rule-based Hybrid**：`scripts/rule_eval.sh` 已就绪，暂缓。
 - **TC OFF / TC ON**：TrajCorr 实验独立进行，作为 Jetson 部署补充验证。
 
@@ -187,14 +198,17 @@ DNN 硬件：主对比四组 DNN 全部在本地 5090。TC OFF（Jetson DNN）�
 
 ## 4. 后续执行顺序
 
-### 阶段一：完成 Stop-and-go 评估 ✅→🔄
+### 阶段一：完成 Stop-and-go 评估 ✅
 
-- [ ] 等待 Stop-and-go `0728-1740` 完成。
-- [ ] 统计导航精度与系统性能全部指标。
+- [x] Stop-and-go `0728-1740` 完成 1418/1418。
+- [x] 冻结汇总、原始 JSONL、输入和 evaluator 哈希。
+- [x] 完成与现有 PPO 的配对边界检查；该检查不替代 PPO–Continuous 主比较。
 
 ### 阶段二：运行 Continuous w=5 评估
 
-- [ ] 使用 `scripts/continue_eval.sh` 运行 1418 集。
+- [ ] 补齐 Continuous 每次 waypoint 后的 simulator collision/done/success 同步。
+- [ ] 运行 5–10 episode smoke 并验收 trace、终止、Fast Eval 和输出完整性。
+- [ ] smoke 通过后使用 `scripts/continue_eval.sh` 运行 1418 集。
 - [ ] 统计全部指标。
 
 ### 阶段三：三组统一对比
@@ -357,8 +371,9 @@ tmux new-session -d -s srv 'source ~/miniforge3/etc/profile.d/conda.sh && conda 
 ## 9. 当前下一步
 
 ```text
-等待 Stop-and-go 0728-1740 完成（预计 7/30 下午）
-→ 立即启动 Continuous w=5（continue_eval.sh）
+修复 Continuous 每次 waypoint 后的 simulator 终止状态同步
+→ 5–10 episode smoke：trace reset / collision termination / Fast Eval / episode_end
+→ smoke 通过后启动 Continuous w=5 正式 1418（continue_eval.sh）
 → Continuous 完成后，三组数据齐
 → 统一对比分析：Stop-and-go vs PPO vs Continuous w=5
 → Reviewer checkpoint A
@@ -366,6 +381,26 @@ tmux new-session -d -s srv 'source ~/miniforge3/etc/profile.d/conda.sh && conda 
 ```
 
 ## 10. 实验记录
+
+### Experiment: Stop-and-go 正式评估
+- Run ID: 0728-1740
+- Date: 2026-07-28/29
+- Run snapshot: `20fd509`（进程启动后 7 分钟提交；关键 evaluator 文件之后未变化）
+- Mode: eval
+- Dataset: seen_valset.json (1418 unique episodes)
+- Output: `/code/TravelUAV/eval_stop_go_0728-1740_fast_x10`
+- Key params: maxWaypoints=200（约 1000 waypoints）, fast_eval x10, trace reset by seq_name
+
+**Evaluation:**
+- SR: 50.21%
+- OSR: 64.81%
+- Collision: 42.03%
+- Avg waypoints: 208.43
+- Avg NE: 66.22m
+- Avg e2e latency: 410.67s (median 346.55s, p95 986.68s)
+
+**Finding:** Stop 通过共享同步参照验收。与 PPO 的 1418-episode 配对边界检查中，PPO mean E2E 仅低 3.36s（0.82%），bootstrap 95% CI 跨 0，同时 SR/OSR/CR/NE 更差。该结果不能证明 C1，也不能替代 PPO–Continuous 正式比较。
+**Reviewer decision:** Stop 结果冻结；PPO 重训 gate 保持关闭；下一步先修复并 smoke Continuous，再运行正式 1418。
 
 ### Experiment: PPO Scheduler 正式评估
 - Run ID: 0723-1845
