@@ -705,6 +705,7 @@ def eval(
                 for retry_i in range(3):
                     planner = None
                     try:
+                        bandwidth_trace.reset_for_episode(env_batchs[0]["seq_name"])
                         state = ContinuousEpisodeState(
                             env_batchs[0],
                             eval_env,
@@ -767,7 +768,7 @@ def eval(
                             current_pose=current_pose,
                         )
 
-                        while not state.dones[0] and control_step < int(args.maxWaypoints):
+                        while not state.dones[0] and control_step < int(args.max_control_steps):
                             applied_result = planner.poll_result()
                             dino_latency_ms = 0.0
                             trajectory_switch_applied = False

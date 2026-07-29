@@ -1,11 +1,11 @@
 # PPO Scheduler 正式实验计划
 
-> 最近更新：2026-07-23（控制预算修复）
+> 最近更新：2026-07-29（Stop-and-go 73%，预计今晚 ~23 点完成）
 >
-> PPO Scheduler 代码提交：待提交
+> PPO Scheduler 代码提交：`20fd509`
 >
 > **架构说明**：最终系统 = PPO Scheduler（调度层）+ TrajCorr（轨迹层）。当前分开评估，消融清晰。
-> TC OFF ≡ Continuous w=5 基线（DNN 在 Jetson vs 5090 的差异仅影响系统时延绝对值，不影响调度策略论证）。
+> 主对比四组基线全部在本地 5090 上运行（统一硬件）。TC OFF 作为 Jetson 部署的补充验证点，不进入主对比。
 >
 > 本文档是 PPO 调度器实验的唯一工作台账。每完成一个阶段，都必须同步更新"当前状态、下一步任务、实验结果和 reviewer 结论"。
 
@@ -44,44 +44,46 @@
 
 ### 已完成
 
-- [x] PPO 调度器 MDP 建模：8 维观测、4 离散动作、SMDP 时间尺度。
-- [x] SplitACPolicy：Actor 看不到 NE（index 7 置零），Critic 看全 8 维。
-- [x] 三项关键修复：`request_age` 第 8 维、gamma 0.999→0.995、DINO 时间减免。
-- [x] 训练 0722-1254 首次避免 CONT_REQ 坍缩，CR 稳定 5-8%。
-- [x] 代码提交，与远程 TrajCorr 模块合并无冲突。
-- [x] 控制预算修复：所有 async 范式统一使用 `max_control_steps=1000`（对齐 stop-and-go）。
-- [x] `scripts/rule_eval.sh` 完善：+fast_eval、+时间戳、+max_control_steps。
+- [x] PPO Scheduler MDP 建模与 SplitACPolicy
+- [x] 三项关键修复（request_age、gamma 0.995、DINO 时间减免）
+- [x] 训练 0722-1254：CR 5-8%，无坍缩
+- [x] **PPO Scheduler 正式评估 `0723-1845`**：SR=47.9%, OSR=58.5%, CR=1.4% 非零, e2e=407.3s
+- [x] 控制预算修复：四个范式统一 1000 waypoints
+- [x] 四个评估脚本全部对齐（eval.sh, continue_eval.sh, rule_eval.sh, drl_scheduler_eval.sh）
+- [x] 重启后 AirSim Server 启动方法已记录
+- [x] fast_eval 逻辑屏障验证：PPO Scheduler 环境 `poll_result` 有 `ready_logical_ms` 屏障，x10 与 x1 逻辑等价
 
 ### 正在进行
 
-- [ ] 正式 DRL 评估 `0723-0012` 运行中（使用旧预算 200，仅用于 CR 坍缩判断）。
+- [ ] **Stop-and-go 正式评估** `0728-1740`：1037/1418（73.1%），运行 17h，快照 SR=52.3%，OSR=66.2%，预计今晚 ~23 点完成。
 
-### 下一步唯一任务
+### 下一步
 
-- [ ] `0723-0012` 完成后，确认 CONT_REQ 没有坍缩到 0%。
-- [ ] 用新预算 1000 重新评估 PPO Scheduler。
+- [ ] Stop-and-go 完成后，立即启动 **Continuous w=5 评估**（`scripts/continue_eval.sh`）
+- [ ] 三组数据齐后（Stop-and-go + PPO + Continuous），分析 PPO 的精度-时延 Pareto 位置
+- [ ] 之后按需跑 Rule-based
 
 ### 暂时不要做
 
-- [ ] 不启动新训练。
-- [ ] 不修改 reward 权重、网络结构或观测空间。
-- [ ] 不跑 Rule-based 评估（等 DRL 评估有阶段性结论后）。
-- [ ] 不尝试将 PPO/Rule-based 部署到 Jetson（DNN 硬件差异已记录，不影响导航精度比较）。
+- [ ] 不启动新训练、不修改 reward/网络/观测空间
+- [ ] 不跑 Rule-based（等三组主对比完成）
 
 ## 1. 研究目标
 
 验证 PPO 调度器能否在 SMDP 时间尺度（1 waypoint 决策步）上学习何时切换到 Continuous 范式（管道化 VLM 请求），从而在维持与 Stop-and-go 接近的 SR/OSR 的前提下，显著降低 UAV-VLN 端到端时延。
 
-正式实验比较以下四组：
+正式实验主对比以下四组（全部在本地 5090，统一硬件）：
 
-1. **Stop-and-go**：请求期间停止飞行，精度上限，时延最高。代码路径：Jetson Edge DNN evaluator（TrajCorr 实验统一口径）。
-2. **Continuous `w=5`（≡ TC OFF）**：异步逐批请求（每 5 waypoints 提交一次），UAV 持续飞行。全管道化，状态漂移最大，精度下限，时延最低。代码路径：TrajCorr TC OFF evaluator（Jetson 架构）。
-3. **Rule-based Hybrid**：基于 buffer 水位和 NE 阈值的确定性规则调度器，工程基线。代码路径：本地 `hybrid_eval.py`（DNN 在 5090）。
-4. **PPO Scheduler（ours）**：DRL 学习的调度策略，目标是在精度-时延 Pareto 前沿上取得优于 Rule-based 的 trade-off。代码路径：本地 `drl_scheduler_eval.py`（DNN 在 5090）。
+1. **Stop-and-go**：请求期间停止飞行，精度上限，时延最高。脚本：`scripts/eval.sh`，代码：`src/vlnce_src/eval.py`。
+2. **Continuous `w=5`**：异步逐批请求（每 5 控制点提交一次），UAV 持续飞行。全管道化，状态漂移最大，精度下限，时延最低。脚本：`scripts/continue_eval.sh`，代码：`src/vlnce_src/continue_eval.py`。
+3. **Rule-based Hybrid**：基于 buffer 水位和 NE 阈值的确定性规则调度器，工程基线。脚本：`scripts/rule_eval.sh`，代码：`src/vlnce_src/hybrid_eval.py`。（暂缓）
+4. **PPO Scheduler（ours）**：DRL 学习的调度策略。脚本：`scripts/drl_scheduler_eval.sh`，代码：`src/vlnce_src/drl_scheduler_eval.py`。✅ 已完成。
 
-四组使用相同数据集、模型权重、通信 trace、Fast Eval 配置和控制预算（1000 waypoints）。
+四组使用相同数据集、模型权重、通信 trace、Fast Eval x10、控制预算（1000 waypoints）、DNN 在 5090。
 
-历史 Continuous `w=5`（旧 `continue_eval.py`）和早期坍缩版 PPO（0718 等）只用于研究动机和问题排查，不进入最终严格对比。
+TC OFF（TrajCorr Jetson 部署）作为补充验证点，不进入主对比。
+
+历史 Continuous `w=5`（旧未修复版本）和早期坍缩版 PPO（0718 等）只用于研究动机，不进入最终统计。
 
 ## 2. 统一评估口径
 
@@ -97,12 +99,12 @@
 
 ### 2.1 四种范式的实际执行语义
 
-- **Stop-and-go**：每个决策步 STOP + REQUEST VLM → 等待结果 → 执行 DNN 输出的 waypoints（实际执行 P1-P5，最多 5 点）。无管道化，请求期间 UAV 悬停。DNN 在 Jetson 运行。
-- **Continuous `w=5`（≡ TC OFF）**：异步逐批请求（每 5 控制点提交一次），结果返回后替换 buffer。全管道化，状态漂移最大。DNN 在 Jetson 运行。与 TC OFF 是同一份代码、同一套指标。
-- **Rule-based Hybrid**：基于 buffer 水位和 NE 阈值的确定性规则切换 STOP/CONTINUE 和 REQUEST/NO_REQUEST。无学习。DNN 在 5090 运行。
-- **PPO Scheduler**：PPO 在 SMDP 时间尺度上输出 4 个离散动作之一，每步根据 8 维观测决策。安全网 DINO 在 NE 阈值处自动触发。DNN 在 5090 运行。
+- **Stop-and-go**：每个决策步 STOP + REQUEST VLM → 等待结果 → 执行 DNN 输出的 waypoints（P1-P5，最多 5 点）。无管道化，请求期间 UAV 悬停。DNN 在 5090。
+- **Continuous `w=5`**：异步逐批请求（每 5 控制点提交一次），结果返回后替换 buffer。全管道化，UAV 在 VLM 推理期间继续飞行。DNN 在 5090。
+- **Rule-based Hybrid**：基于 buffer 水位和 NE 阈值的确定性规则切换 STOP/CONTINUE 和 REQUEST/NO_REQUEST。无学习。DNN 在 5090。（暂缓）
+- **PPO Scheduler**：PPO 在 SMDP 尺度上输出 4 个离散动作，每步根据 8 维观测决策。安全网 DINO 在 NE 阈值处自动触发。DNN 在 5090。✅ 已完成。
 
-架构差异：TC OFF 的 DNN 在 Jetson 推理，PPO/Rule-based 的 DNN 在 5090 推理。DNN 模型权重相同，输出相同，**导航精度直接可比**。系统时延绝对值不可直接比（Jetson DNN 慢于 5090），但论文的核心论点是调度决策减少 VLM 等待时间，与 DNN 硬件无关。论文中以 footnote 说明即可，不作为需要修复的实验问题。
+DNN 硬件：主对比四组 DNN 全部在本地 5090。TC OFF（Jetson DNN）作为 TrajCorr 模块的补充验证点，不进入主对比表。
 
 ### 2.2 PPO Scheduler 设计摘要
 
@@ -155,22 +157,25 @@
   - MA20 reward 始终在 −4 到 +4 之间窄幅波动，已收敛
   - CONT_REQ 行为具备策略智能：42% 在 buf=1、33% 在 buf=2、96% 有 inflight 管道化
 
-### 3.2 正式 DRL 评估：0723-0012（旧预算 200，仅用于坍缩检测）
+### 3.2 PPO Scheduler 正式评估：✅ 已完成
 
-- Run ID：`0723-0012`
-- 结果目录：`/code/TravelUAV/eval_drl_0723-0012_fast_x10`
-- 配置：确定性推理、Fast Eval `x10`、**旧预算 max_control_steps=200**
-- 状态：即将完成
+- Run ID：`0723-1845`
+- 结果目录：`/code/TravelUAV/eval_drl_0723-1845_fast_x10`
+- 配置：确定性推理、Fast Eval `x10`、`max_control_steps=1000`
+- 结果：见下方实验记录
 
-> 此评估的控制预算仅为 stop-and-go 的 1/5，SR/OSR 不可直接对比。仅用于确认 CONT_REQ 没有坍缩。
-> 预算修复后需用 `max_control_steps=1000` 重跑。
+### 3.3 Stop-and-go 正式评估：🔄 运行中
 
-### 3.3 基线状态
+- Run ID：`0728-1740`
+- 结果目录：`/code/TravelUAV/eval_stop_go_0728-1740_fast_x10`
+- 配置：Fast Eval `x10`、`maxWaypoints=200`（→ 1000 waypoints）
+- 快照：SR=56.5%，预计 7/30 下午完成
 
-- Stop-and-go 基线：TrajCorr 实验阶段二产出（Jetson，`maxWaypoints=200` 决策步）。
-- Continuous `w=5`（≡ TC OFF）：TrajCorr 实验阶段一产出（Jetson，`max_control_steps=1000`）。当前 TC OFF `0723-1551` 运行中。
-- Rule-based Hybrid 基线：`scripts/rule_eval.sh` 已就绪，尚未运行。
-- PPO Scheduler：待 0723-0012 完成后用新预算重跑。
+### 3.4 基线状态
+
+- **Continuous w=5**：`scripts/continue_eval.sh` 已对齐修复，Stop-and-go 完成后立即启动。
+- **Rule-based Hybrid**：`scripts/rule_eval.sh` 已就绪，暂缓。
+- **TC OFF / TC ON**：TrajCorr 实验独立进行，作为 Jetson 部署补充验证。
 
 ### 3.4 PPO 训练历史（不进入正式对比）
 
@@ -182,54 +187,30 @@
 
 ## 4. 后续执行顺序
 
-### 阶段一：完成并验收旧预算评估 0723-0012
+### 阶段一：完成 Stop-and-go 评估 ✅→🔄
 
-- [ ] 等待评估完成全部 1418 个 episode。
-- [ ] 确认 CONT_REQ > 0%（核心坍缩检测）。
-- [ ] 统计动作分布、buffer-level 行为。
-- [ ] 记录结果但注明预算不公平，不进入正式对比。
+- [ ] 等待 Stop-and-go `0728-1740` 完成。
+- [ ] 统计导航精度与系统性能全部指标。
 
-### 阶段二：新预算 PPO Scheduler 评估
+### 阶段二：运行 Continuous w=5 评估
 
-- [ ] 使用 `scripts/drl_scheduler_eval.sh`（已修复 `max_control_steps=1000`）运行 1418 集。
-- [ ] 统计导航精度、系统性能、调度行为全部指标。
-- [ ] 确认 CONT_REQ 保持非零。
+- [ ] 使用 `scripts/continue_eval.sh` 运行 1418 集。
+- [ ] 统计全部指标。
+
+### 阶段三：三组统一对比
+
+- [ ] Stop-and-go vs PPO vs Continuous w=5。
+- [ ] 分析 PPO 在精度-时延 Pareto 前沿上的位置。
 
 **Reviewer checkpoint A：**
 
-- PPO 调度器是否退化为 stop-and-go（CR=0%）？
-- 调度行为是否展现出策略智能？
-- 结果能否作为 PPO Scheduler 的正式评估？
-
-### 阶段三：运行 Rule-based 基线
-
-- [ ] 使用 `scripts/rule_eval.sh`（`max_control_steps=1000`）运行 1418 集。
-- [ ] 输出与 PPO Scheduler 完全相同的指标。
-
-### 阶段四：收集 TrajCorr 基线
-
-- [ ] 等待 TrajCorr 实验产出正式 Stop-and-go 和 TC OFF 结果。
-- [ ] 确认与 PPO/Rule-based 评估口径一致。
-
-### 阶段五：四组统一对比与分析
-
-- [ ] 输出四组导航精度与系统性能表格。
-- [ ] 分析 PPO Scheduler 在精度-时延 Pareto 前沿上的位置。
-- [ ] 计算精度保持率和时延节省率。
-
-**Reviewer checkpoint B：**
-
-- PPO Scheduler 是否在精度-时延 trade-off 上优于 Rule-based？
-- CONT_REQ 的行为规律是否可以清晰解释？
+- PPO 是否在精度-时延 trade-off 上优于纯 Continuous？
+- CONT_REQ 是否具备可解释的规律？
 - 证据是否足以支持论文表述？
 
-### 阶段六：深度分析与可选消融
+### 阶段四（后续）：Rule-based + 消融
 
-（同之前）
-
-### 阶段七：论文写作
-
-（同之前）
+（P1 优先级，暂不安排）
 
 ## 5. 最终比较
 
@@ -350,19 +331,64 @@ Next action:
 | `src/vlnce_src/drl_ac_policy.py` | SplitACPolicy：Actor/Critic 输入分离 |
 | `src/vlnce_src/drl_scheduler_train.py` | PPO 训练入口 |
 | `src/vlnce_src/drl_scheduler_eval.py` | PPO 评估入口 |
-| `scripts/drl_scheduler_train.sh` | 训练超参（gamma、weights、episodes） |
-| `scripts/drl_scheduler_eval.sh` | 评估配置（模型路径、fast_eval） |
+| `src/vlnce_src/eval.py` | Stop-and-go 评估 |
+| `src/vlnce_src/continue_eval.py` | Continuous w=5 评估 |
+| `src/vlnce_src/hybrid_eval.py` | Rule-based 评估（暂缓） |
+| `scripts/drl_scheduler_train.sh` | 训练超参 |
+| `scripts/drl_scheduler_eval.sh` | PPO 评估配置 |
+| `scripts/eval.sh` | Stop-and-go 评估脚本 |
+| `scripts/continue_eval.sh` | Continuous w=5 评估脚本 |
+| `scripts/rule_eval.sh` | Rule-based 评估脚本（暂缓） |
 | `src/common/param.py` | 所有 CLI 参数定义与默认值 |
+| `airsim_plugin/AirVLNSimulatorServerTool.py` | AirSim 管理服务 |
+
+### 重启后环境恢复
+
+```bash
+# 1. SSHFS 挂载
+sshfs -o reconnect,ServerAliveInterval=15 zt@192.168.105.17:/HDD2/TravelUAV_dataset /HDD2/TravelUAV_dataset
+sshfs -o reconnect,ServerAliveInterval=15 zt@192.168.105.17:/HDD2/AeroDuo_envs /HDD2/AeroDuo_envs
+sshfs -o reconnect,ServerAliveInterval=15 zt@192.168.105.17:/HDD1/code/TravelUAV/Model /code/TravelUAV/Model
+
+# 2. AirSim Server
+tmux new-session -d -s srv 'source ~/miniforge3/etc/profile.d/conda.sh && conda activate llamauav && cd /code/TravelUAV && python -u airsim_plugin/AirVLNSimulatorServerTool.py --port 25000 --root_path /code/TravelUAV/'
+```
 
 ## 9. 当前下一步
 
 ```text
-等待 0723-0012 完成（CR 坍缩检测）
-→ Reviewer 确认 CR ≠ 0%
-→ 用新预算 max_control_steps=1000 重跑 PPO Scheduler 评估
+等待 Stop-and-go 0728-1740 完成（预计 7/30 下午）
+→ 立即启动 Continuous w=5（continue_eval.sh）
+→ Continuous 完成后，三组数据齐
+→ 统一对比分析：Stop-and-go vs PPO vs Continuous w=5
 → Reviewer checkpoint A
-→ 跑 Rule-based 基线（scripts/rule_eval.sh）
-→ 等 TrajCorr 产出 Stop-and-go + TC OFF 结果
-→ 四组统一对比
-→ Reviewer checkpoint B
+→ （后续）Rule-based + 消融
 ```
+
+## 10. 实验记录
+
+### Experiment: PPO Scheduler 正式评估
+- Run ID: 0723-1845
+- Date: 2026-07-23/24
+- Code commit: 6a73390
+- Mode: eval
+- Dataset: seen_valset.json (1418 episodes)
+- Output: `/code/TravelUAV/eval_drl_0723-1845_fast_x10`
+- Key params: max_control_steps=1000, fast_eval x10, deterministic=True
+
+**Evaluation:**
+- SR: 47.9%
+- OSR: 58.5%
+- CR (碰撞): 47.3%
+- Avg waypoints: 205.6
+- Avg NE: 74.6m
+- CONT_REQ rate: 1.4%
+- STOP_REQUEST rate: 14.7%
+- Avg e2e latency: 407.3s (med 343.9s, p95 1007.6s)
+- Avg T_action: 924ms
+- Avg T_dec: 4782ms
+- Avg time drift: 7074ms
+- Avg state drift: 2.45m
+
+**Finding:** CR=1.4% 非零，策略没有坍缩回 stop-and-go。大部分步是 stop-and-go 行为，PPO 在安全时使用 CONT_REQ 管道化。精度接近 stop-and-go（快照 57% vs PPO 48%）。
+**Reviewer decision:** 待 Stop-and-go 完成后统一对比。
