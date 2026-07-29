@@ -394,6 +394,17 @@ class ContinuousEpisodeState:
     def current_sim_pose(self) -> List[float]:
         return copy.deepcopy(self.eval_env.sim_states[0].pose[0:3])
 
+    def sync_runtime_status_from_sim(self) -> None:
+        sim_state = self.eval_env.sim_states[0]
+        if bool(getattr(sim_state, "is_collisioned", False)):
+            self.collisions[0] = True
+            self.dones[0] = True
+        if bool(getattr(sim_state, "is_end", False)):
+            self.dones[0] = True
+        if bool(getattr(sim_state, "oracle_success", False)):
+            self.oracle_success = True
+        self.distance_to_ends.append(self._calculate_distance_from_position(self.current_sim_pose()))
+
     def process_env_output(self, outputs) -> None:
         observations, dones, collisions, oracle_success = [list(x) for x in zip(*outputs)]
         collision_flags, done_flags = self._check_collision_for_continuous(observations, dones, collisions)
@@ -830,12 +841,16 @@ def eval(
                                 active_index += chunk_size
                                 control_step += 1
                                 executed_since_decision += chunk_size
+                                state.sync_runtime_status_from_sim()
 
                                 decision_obs_latency_ms = 0.0
                                 decision_observation_pose = None
                                 should_request_decision = (
-                                    active_index >= len(active_traj)
-                                    or executed_since_decision >= chunk_waypoints
+                                    not state.dones[0]
+                                    and (
+                                        active_index >= len(active_traj)
+                                        or executed_since_decision >= chunk_waypoints
+                                    )
                                 )
                                 if should_request_decision:
                                     request_counter, pending_snapshot, decision_obs_latency_ms, dino_latency_ms, dino_predicted_this_step = _run_decision_cycle(
