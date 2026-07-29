@@ -1,6 +1,6 @@
 # 轨迹修正模块正式实验计划
 
-> 最近更新：2026-07-23
+> 最近更新：2026-07-29
 >
 > TC ON 代码提交：`251dcd4`
 >
@@ -34,7 +34,7 @@
 
 运行约束：
 
-- 当前 TC OFF 完成前，不重启 evaluator，不在 Jetson 再次 pull，不切换其运行代码。
+- 当前 TC ON 完成前，不重启 evaluator，不在 Jetson 再次 pull，不切换其运行代码。
 - 只在用户主动询问、出现异常，或累计增加约 100 个 episode 时检查长时间实验。
 - 结果目录必须使用独立 Run ID，禁止覆盖或混合续跑不同代码版本。
 
@@ -47,19 +47,24 @@
 - [x] TC ON 代码提交为 `251dcd4`，静态与单元测试通过。
 - [x] 启动正式 TC OFF：`0723-1551`。
 - [x] 正式 TC OFF 完成 1418 个 episode，并完成第一轮指标统计。
-- [x] Reviewer checkpoint A：TC OFF 可作为关闭轨迹修正的正式异步基线。
+- [x] Reviewer checkpoint A：TC OFF 的数据、终止条件和控制预算通过检查；其 Fast Eval x1 等价性后续单独复核。
 - [x] 在 5090 工作站启动正式 Stop-and-go：`0728-1740`。
 - [x] 在 4090 + Jetson 完成 TC ON 跨端 smoke test，并清理临时输出。
 - [x] 按用户决定启动正式 TC ON：`0728-1810`。
+- [x] 完成 Fast Eval 时序代码审计，确认 TrajCorr evaluator 的虚拟时间实现存在缺口，详见 2.3 节。
+- [x] 量化现有 TC OFF：54164 次非冷启动请求平均晚于虚拟 ready time `2772.3ms`，1336 个 episode 出现超过一个动作边界的晚应用。
 
 ### 正在进行
 
 - [ ] 正式 Stop-and-go 完整运行 1418 个 episode。
 - [ ] 正式 TC ON 完整运行 1418 个 episode。
+- [ ] 将当前 TC ON 作为旧版 x10 完整实验继续运行，不在中途修改代码。
 
 ### 下一步唯一任务
 
-- [ ] Stop-and-go 与 TC ON 完成后，按 TC OFF 的统一口径统计并执行 Reviewer checkpoint B。
+- [ ] 等待 Stop-and-go 与当前 TC ON 完成，保留并统计现有结果。
+- [ ] 修复 TC OFF/ON 共用的 Fast Eval 虚拟时间控制。
+- [ ] 使用相同的 50 个 episode 比较“旧 x10、修复后 x10、正常 x1”，再决定是否完整重跑。
 
 ### 暂时不要做
 
@@ -116,6 +121,39 @@
 - 轨迹修正不声称消除 coarse shift；它通过当前图像和当前位置重新生成细粒度轨迹，补偿 coarse result 应用时的执行起点失配。
 - Time shift 仅记录和分析，当前不作为是否触发轨迹修正的 gate。
 
+### 2.3 Fast Eval 时序审计
+
+Fast Eval 的目标不是简单把所有时间除以 10，而是保持原速系统中“新轨迹在第几个 waypoint 生效”的顺序：
+
+1. AirSim 动作使用 `ClockSpeed=10`。
+2. 异步上行只消耗原来的 `1/10` 墙钟时间；UAV 同时以 x10 执行旧 buffer，因此对应完整的原速上行时延。
+3. VLM/DINO/DNN 推理时间不乘 10。
+4. 使用虚拟原速时间决定新结果何时可见，并用虚拟时间统计动作、time shift 和 episode latency。
+
+代码审计结论：
+
+- Stop-and-go 请求期间本来就停止飞行，其 Fast Eval 时序成立。
+- Continuous、Rule-based 和 PPO 的 planner 已包含“真实 VLM 尚未完成时，不允许 x10 仿真额外越过其原速返回时刻”的处理。
+- TC OFF/ON 使用独立的 `LatestOnlyEdgeVLMClient`。该客户端记录了虚拟返回时间，但真实 RPC 尚未完成时仍可能继续执行 x10 waypoint，因此 TrajCorr 的 Fast Eval 实现不完整。
+
+2026-07-28 22:01 的只读日志审计：
+
+- 已完成 TC OFF 的 54164 次非冷启动请求中，结果相对计算出的虚拟 ready time 平均晚应用 `2772.3ms`。
+- Edge RPC 的平均真实计算时间为 `351.1ms`；在 x10 下，未隔离的理论放大量约为 `351.1 × (10-1) = 3159.9ms`，与日志量级一致。
+- TC OFF 中 1336 个 episode 出现结果晚于前一个 waypoint 边界一个以上动作时间的记录。
+- 正在运行的 TC ON 同样使用该客户端，但目标锁定和等待会改变受影响程度，因此不能假设 OFF/ON 偏差完全抵消。
+
+当前实验处理：
+
+- 不删除、不覆盖，也不在运行中修改 TC OFF/ON 结果。
+- 当前 TC OFF/ON 先标记为“统一 x10 加速设置下的完整实验”，尚未证明与 x1 数值等价。
+- 投稿前最低验证：修复 TrajCorr 虚拟时间控制后，用相同的 50 个 episode 比较三组：
+  1. 已有旧 x10；
+  2. 修复后 x10；
+  3. 正常 x1。
+- 若修复后 x10 与 x1 的结果应用控制步、轨迹行为和指标趋势接近，并且旧 x10 的 OFF/ON 收益方向一致，则保留已有完整 x10 结果并明确实验设置，不完整重跑。
+- 若旧 x10 与修复后 x10/x1 出现明显不同的导航结论，则重新完整运行修复后的 TC OFF 和 TC ON。
+
 ## 3. 当前状态
 
 ### 3.1 正式 TC OFF 已完成
@@ -126,7 +164,7 @@
 - 配置：
   `trajcorr_mode=off`、`w=5`、`max_control_steps=1000`、Fast Eval `x10`
 
-该实验使用启动时加载的提交 `d42637f`，已完成 `1418/1418` 个 episode，无残留评估进程。profile 包含 1418 条唯一 `episode_end` 记录。
+该实验使用启动时加载的提交 `d42637f`，已完成 `1418/1418` 个 episode，无残留评估进程。profile 包含 1418 条唯一 `episode_end` 记录。其结果完整，但由于 2.3 节记录的 TrajCorr Fast Eval 缺口，当前作为 x10 加速实验保存，正式 x1 等价性待验证。
 
 | 指标 | TC OFF |
 |---|---:|
@@ -173,7 +211,7 @@ Smoke test 使用 3 条具有 `state shift >= 2.5m` 的 TC OFF episode，确认�
 - 4090：AirSim Server `25000`，Edge VLM Server `26000`
 - 配置：`trajcorr_mode=on`、`max_control_steps=1000`、Fast Eval `x10`
 
-正式 TC ON 已进入第一个 AirSim scene 并开始写 profile；首个 episode 已结束，后续 episode 正在运行。
+正式 TC ON 正在运行。2026-07-29 10:29 已完成 `267/1418` 个 episode，约 `18.8%`；最近 100 个 episode 平均约为 `250s/episode`。若后续速度保持，预计还需约 `3–3.5 天`，约在 2026-08-01 完成。该估算会随长 episode、场景切换和重试变化。
 
 正式 TC ON 必须同时包含：
 
@@ -475,8 +513,11 @@ Next action:
 
 ```text
 等待正式 Stop-and-go 0728-1740 与 TC ON 0728-1810 完成
-→ 分别统计并验收两组结果
-→ Reviewer checkpoint B
+→ 保留并统计现有 x10 结果
+→ 修复 TrajCorr Fast Eval 虚拟时间控制
+→ 用相同 50 个 episode 比较：旧 x10 / 修复后 x10 / 正常 x1
+→ 修复后 x10 与 x1 接近且旧 x10 结论一致：保留完整旧 x10，不重跑
+→ 结论明显不同：完整重跑修复后的 TC OFF 和 TC ON
 ```
 
-在 Reviewer checkpoint B 完成前，不调整 TC ON 策略或统一评估边界。
+当前 TC ON 运行期间不修改或同步 Jetson evaluator。Fast Eval 修复必须使用新进程和新输出目录，禁止与 `0728-1810` 混合续跑。在 Reviewer checkpoint 完成前，不调整 TC ON 轨迹修正策略或其他统一评估边界。
