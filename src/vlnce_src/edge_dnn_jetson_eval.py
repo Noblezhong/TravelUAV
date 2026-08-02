@@ -44,6 +44,8 @@ from src.vlnce_src.fast_eval_time import (
     FastResultTiming,
     action_timing,
     configure_fast_eval_output,
+    fast_result_is_ready,
+    wait_for_fast_edge_worker_if_due,
 )
 from src.vlnce_src.trajcorr_runtime import (
     COMPLETION_BUFFER_EXHAUSTED,
@@ -495,6 +497,7 @@ class LatestOnlyEdgeVLMClient:
         self._has_result = False
         self._error: Optional[BaseException] = None
         self._inflight = False
+        self._edge_arrival_logical_ms: Optional[float] = None
         self._closed = False
         self._thread = threading.Thread(target=self._worker_loop, daemon=True)
         self._thread.start()
@@ -515,18 +518,30 @@ class LatestOnlyEdgeVLMClient:
         with self._condition:
             if self._error is not None:
                 raise self._error
+            wait_for_fast_edge_worker_if_due(
+                condition=self._condition,
+                clock=self.clock,
+                fast_eval=self.fast_eval,
+                has_result=lambda: self._has_result,
+                is_inflight=lambda: self._inflight,
+                edge_arrival_logical_ms=lambda: self._edge_arrival_logical_ms,
+                get_error=lambda: self._error,
+            )
             if not self._has_result:
                 return None
             if (
-                self.fast_eval
-                and self._result is not None
-                and self._result.ready_logical_ms is not None
-                and self.clock.now_ms < self._result.ready_logical_ms
+                self._result is not None
+                and not fast_result_is_ready(
+                    self.clock,
+                    self.fast_eval,
+                    self._result.ready_logical_ms,
+                )
             ):
                 return None
             result = self._result
             self._result = None
             self._has_result = False
+            self._edge_arrival_logical_ms = None
             return result
 
     def wait_result(self, timeout_s: float = 180.0) -> EdgeCoarseResult:
@@ -548,6 +563,7 @@ class LatestOnlyEdgeVLMClient:
             self._has_result = False
             if self.fast_eval:
                 self.clock.advance_to(result.ready_logical_ms)
+            self._edge_arrival_logical_ms = None
             return result
 
     def close(self) -> None:
@@ -589,6 +605,12 @@ class LatestOnlyEdgeVLMClient:
             _, payload_bits, payload_mb = estimate_uplink_payload_bits_from_episodes([snapshot.episode])
         bandwidth_bps = self.bandwidth_trace.next_bandwidth_bps()
         uplink_latency_ms = calculate_latency_ms(payload_bits, bandwidth_bps) if self.enable_comm_delay else 0.0
+        if self.fast_eval and snapshot.submitted_logical_ms is not None:
+            with self._condition:
+                self._edge_arrival_logical_ms = float(
+                    snapshot.submitted_logical_ms + uplink_latency_ms
+                )
+                self._condition.notify_all()
         if uplink_latency_ms > 0:
             divisor = self.clock.speedup if self.fast_eval else 1.0
             time.sleep(uplink_latency_ms / (1000.0 * divisor))

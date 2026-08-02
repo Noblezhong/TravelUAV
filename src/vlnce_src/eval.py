@@ -34,7 +34,7 @@ from src.vlnce_src.fast_eval_time import (
     action_timing,
     configure_fast_eval_output,
 )
-from src.vlnce_src.eval_contract import stop_executed_waypoint_count
+from src.vlnce_src.eval_contract import execute_stop_waypoint_chunks
 from utils.logger import logger
 from utils.utils import *
 
@@ -112,6 +112,8 @@ def eval(
                             ignore_tiny_diff=True,
                         )
                         episode_clock = FastEvalClock(fast_eval, args.fast_eval_speedup)
+                        completed_decisions = 0
+                        executed_control_steps = 0
                         pbar.update(n=eval_env.batch_size)
                         assist_notices = None
 
@@ -142,7 +144,10 @@ def eval(
                             )
 
                             action_start = time.perf_counter()
-                            eval_env.makeActions(refined_waypoints)
+                            _, executed_this_decision = execute_stop_waypoint_chunks(
+                                eval_env,
+                                refined_waypoints,
+                            )
                             action_end = time.perf_counter()
                             action_times = action_timing(
                                 eval_env,
@@ -153,6 +158,8 @@ def eval(
                                 action_times["action_sim_time_ms"],
                                 action_times["action_wall_time_ms"],
                             )
+                            completed_decisions += 1
+                            executed_control_steps += int(executed_this_decision)
 
                             obs_start = time.perf_counter()
                             outputs = eval_env.get_obs()
@@ -187,8 +194,8 @@ def eval(
 
                             profile_info = {
                                 "episode_step": int(t),
-                                "decision_steps": int(t + 1),
-                                "executed_waypoints": stop_executed_waypoint_count(t + 1),
+                                "decision_steps": int(completed_decisions),
+                                "executed_waypoints": int(executed_control_steps),
                                 "batch_size": int(eval_env.batch_size),
                                 "seq_names": seq_names,
                                 "map_names": map_names,
@@ -226,9 +233,9 @@ def eval(
                                 "record_type": "episode_end",
                                 "seq_names": [env_batch["seq_name"]],
                                 "map_names": [env_batch["map_name"]],
-                                "decision_steps": int(t),
-                                "control_steps": stop_executed_waypoint_count(t),
-                                "executed_waypoints": stop_executed_waypoint_count(t),
+                                "decision_steps": int(completed_decisions),
+                                "control_steps": int(executed_control_steps),
+                                "executed_waypoints": int(executed_control_steps),
                                 "episode_latency_ms": float(episode_clock.now_ms),
                                 "success": bool(batch_state.success[batch_idx]),
                                 "oracle_success": bool(batch_state.oracle_success[batch_idx]),

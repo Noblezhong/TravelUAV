@@ -2,7 +2,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 
 def as_bool(value: Any) -> bool:
@@ -92,6 +92,53 @@ class FastResultTiming:
             + self.llm_latency_ms
             + self.traj_latency_ms
         )
+
+
+def fast_result_is_ready(
+    clock: FastEvalClock,
+    fast_eval: bool,
+    ready_logical_ms: Optional[float],
+) -> bool:
+    """Return whether a completed worker result may enter the simulation."""
+    return bool(
+        not fast_eval
+        or ready_logical_ms is None
+        or clock.now_ms >= float(ready_logical_ms)
+    )
+
+
+def wait_for_fast_edge_worker_if_due(
+    condition,
+    clock: FastEvalClock,
+    fast_eval: bool,
+    has_result: Callable[[], bool],
+    is_inflight: Callable[[], bool],
+    edge_arrival_logical_ms: Callable[[], Optional[float]],
+    get_error: Callable[[], Optional[BaseException]],
+) -> None:
+    """Freeze logical progress once the request reaches the real edge worker.
+
+    Fast Eval cannot know the measured compute duration until the real worker
+    finishes.  Once logical upload is complete, callers therefore wait in wall
+    time without advancing the logical clock.  The completed result remains
+    gated separately until its modeled ``ready_logical_ms``.
+
+    The caller must hold ``condition`` while invoking this function.
+    """
+    while True:
+        edge_arrival = edge_arrival_logical_ms()
+        if not (
+            fast_eval
+            and not has_result()
+            and is_inflight()
+            and edge_arrival is not None
+            and clock.now_ms >= float(edge_arrival)
+        ):
+            return
+        condition.wait(timeout=0.05)
+        error = get_error()
+        if error is not None:
+            raise error
 
 
 def action_timing(eval_env, measured_wall_ms: float, fast_eval: bool) -> Dict[str, float]:

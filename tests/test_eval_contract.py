@@ -5,9 +5,11 @@ import numpy as np
 from src.vlnce_src.eval_contract import (
     check_collision_without_tiny_diff,
     control_budget_reached,
+    execute_stop_waypoint_chunks,
     mark_ne_regression_failure,
     stop_executed_waypoint_count,
     stop_executed_waypoints,
+    stop_single_waypoint_chunks,
 )
 
 
@@ -27,6 +29,40 @@ class StopOracleWaypointTest(unittest.TestCase):
             stop_executed_waypoints(waypoints),
             waypoints[:5],
         )
+
+    def test_stop_decision_is_split_into_five_single_waypoint_calls(self):
+        waypoints = [[[float(index), 0.0, 0.0] for index in range(1, 8)]]
+        chunks = stop_single_waypoint_chunks(waypoints)
+        self.assertEqual(len(chunks), 5)
+        self.assertTrue(all(len(chunk[0]) == 1 for chunk in chunks))
+        self.assertEqual(
+            [chunk[0][0] for chunk in chunks],
+            waypoints[0][:5],
+        )
+
+    def test_stop_uses_shared_chunk_controller_and_aggregates_timing(self):
+        class FakeEnv:
+            def __init__(self):
+                self.calls = []
+                self.last_action_timings = []
+                self.sim_states = []
+
+            def makeActionsChunk(self, waypoint_chunk, target_idx):
+                self.calls.append((waypoint_chunk, target_idx))
+                self.last_action_timings = [
+                    {"wall_time_ms": 2.0, "sim_time_ms": 3.0}
+                ]
+                return [[{"waypoint": waypoint_chunk[0][0]}]]
+
+        env = FakeEnv()
+        waypoints = [[[float(index), 0.0, 0.0] for index in range(1, 7)]]
+        results, executed = execute_stop_waypoint_chunks(env, waypoints)
+        self.assertEqual(executed, 5)
+        self.assertEqual(len(env.calls), 5)
+        self.assertTrue(all(target_idx == 1 for _, target_idx in env.calls))
+        self.assertEqual(len(results[0]), 5)
+        self.assertEqual(env.last_action_timings[0]["wall_time_ms"], 10.0)
+        self.assertEqual(env.last_action_timings[0]["sim_time_ms"], 15.0)
 
 
 class CollisionContractTest(unittest.TestCase):
