@@ -31,7 +31,7 @@ class EdgeVLMFastEvalBarrierTest(unittest.TestCase):
 
         def poll_barrier():
             with condition:
-                wait_for_fast_edge_worker_if_due(
+                waited_ms = wait_for_fast_edge_worker_if_due(
                     condition=condition,
                     clock=clock,
                     fast_eval=True,
@@ -42,7 +42,7 @@ class EdgeVLMFastEvalBarrierTest(unittest.TestCase):
                     ],
                     get_error=lambda: state["error"],
                 )
-                returned.append("released")
+                returned.append(waited_ms)
 
         poll_thread = threading.Thread(
             target=poll_barrier,
@@ -59,7 +59,8 @@ class EdgeVLMFastEvalBarrierTest(unittest.TestCase):
 
         poll_thread.join(timeout=1.0)
         self.assertFalse(poll_thread.is_alive())
-        self.assertEqual(returned, ["released"])
+        self.assertEqual(len(returned), 1)
+        self.assertGreaterEqual(returned[0], 50.0)
         self.assertEqual(clock.now_ms, 100.0)
 
 

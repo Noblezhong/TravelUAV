@@ -115,7 +115,7 @@ def wait_for_fast_edge_worker_if_due(
     is_inflight: Callable[[], bool],
     edge_arrival_logical_ms: Callable[[], Optional[float]],
     get_error: Callable[[], Optional[BaseException]],
-) -> None:
+) -> float:
     """Freeze logical progress once the request reaches the real edge worker.
 
     Fast Eval cannot know the measured compute duration until the real worker
@@ -125,6 +125,7 @@ def wait_for_fast_edge_worker_if_due(
 
     The caller must hold ``condition`` while invoking this function.
     """
+    wait_start = None
     while True:
         edge_arrival = edge_arrival_logical_ms()
         if not (
@@ -134,7 +135,11 @@ def wait_for_fast_edge_worker_if_due(
             and edge_arrival is not None
             and clock.now_ms >= float(edge_arrival)
         ):
-            return
+            if wait_start is None:
+                return 0.0
+            return float((time.perf_counter() - wait_start) * 1000.0)
+        if wait_start is None:
+            wait_start = time.perf_counter()
         condition.wait(timeout=0.05)
         error = get_error()
         if error is not None:

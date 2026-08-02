@@ -103,6 +103,7 @@ class EdgeCoarseResult:
     edge_arrival_logical_ms: Optional[float]
     ready_logical_ms: Optional[float]
     applied_logical_ms: Optional[float]
+    edge_barrier_wait_wall_ms: float
     coarse_local: Optional[List[float]]
     coarse_goal_world: Optional[List[float]]
     coarse_goal_world_source: str
@@ -518,7 +519,7 @@ class LatestOnlyEdgeVLMClient:
         with self._condition:
             if self._error is not None:
                 raise self._error
-            wait_for_fast_edge_worker_if_due(
+            barrier_wait_wall_ms = wait_for_fast_edge_worker_if_due(
                 condition=self._condition,
                 clock=self.clock,
                 fast_eval=self.fast_eval,
@@ -529,6 +530,10 @@ class LatestOnlyEdgeVLMClient:
             )
             if not self._has_result:
                 return None
+            if self._result is not None:
+                self._result.edge_barrier_wait_wall_ms += float(
+                    barrier_wait_wall_ms
+                )
             if (
                 self._result is not None
                 and not fast_result_is_ready(
@@ -661,6 +666,7 @@ class LatestOnlyEdgeVLMClient:
             edge_arrival_logical_ms=fast_timing.edge_arrival_logical_ms,
             ready_logical_ms=fast_timing.ready_logical_ms,
             applied_logical_ms=None,
+            edge_barrier_wait_wall_ms=0.0,
             coarse_local=copy.deepcopy(coarse_local),
             coarse_goal_world=coarse_goal,
             coarse_goal_world_source=coarse_goal_source,
@@ -1010,7 +1016,9 @@ def eval(
                                 "wall_elapsed_ms": float(episode_clock.wall_elapsed_ms),
                                 "logical_elapsed_ms": float(episode_clock.now_ms),
                                 "result_ready_logical_ms": result.ready_logical_ms,
+                                "result_edge_arrival_logical_ms": result.edge_arrival_logical_ms,
                                 "result_applied_logical_ms": result.applied_logical_ms,
+                                "edge_barrier_wait_wall_ms": result.edge_barrier_wait_wall_ms,
                                 "success": bool(state.success),
                                 "collision": bool(state.collisions[0]),
                                 "done": bool(state.dones[0]),
@@ -1382,7 +1390,9 @@ def eval(
                                 "wall_elapsed_ms": float(episode_clock.wall_elapsed_ms),
                                 "logical_elapsed_ms": float(episode_clock.now_ms),
                                 "result_ready_logical_ms": active_coarse_result.ready_logical_ms,
+                                "result_edge_arrival_logical_ms": active_coarse_result.edge_arrival_logical_ms,
                                 "result_applied_logical_ms": active_coarse_result.applied_logical_ms,
+                                "edge_barrier_wait_wall_ms": active_coarse_result.edge_barrier_wait_wall_ms,
                                 "coarse_local": copy.deepcopy(active_coarse_result.coarse_local),
                                 "coarse_goal_world": copy.deepcopy(active_coarse_result.coarse_goal_world),
                                 "coarse_goal_world_source": active_coarse_result.coarse_goal_world_source,
