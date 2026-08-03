@@ -269,7 +269,7 @@ class DRLSchedulerEnv(gym.Env):
         self.episode_idx = -1
         self.episode_start_perf = 0.0
         self.clock = FastEvalClock(bool(args.fast_eval), args.fast_eval_speedup)
-        self.last_observed_bandwidth_bps = float(self.bandwidth_trace.next_bandwidth_bps())
+        self.last_observed_bandwidth_bps = 0.0
         self.closed = False
         self._safety_last_threshold: Optional[float] = None
         self._last_request_step: int = 0  # step counter of last VLM request submission
@@ -299,6 +299,7 @@ class DRLSchedulerEnv(gym.Env):
         self.scheduler_step_count = 0
         self._safety_last_threshold = None
 
+        self.bandwidth_trace.reset_for_episode(self.env_batch[0]["seq_name"])
         observed_bw = self._sample_bandwidth()
         snapshot = self.state.build_snapshot(self.request_counter, self.control_step)
         snapshot.submitted_logical_ms = self.clock.now_ms if self.clock.enabled else None
