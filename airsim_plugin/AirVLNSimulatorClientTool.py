@@ -203,7 +203,8 @@ class AirVLNSimulatorClientTool:
                 logger.error(f'打开场景失败，机器: {socket_client.address._host}:{socket_client.address._port}')
                 raise Exception('打开场景失败')
             assert len(result[1]) == 2, '打开场景失败'
-            print('connecting to ready airsim scene...')
+            print('waiting for airsim connection...')
+            time.sleep(1)  # Server already waited for AirSim ready
             ip = result[1][0]
             if isinstance(ip, bytes):
                 ip = ip.decode('utf-8')
@@ -538,8 +539,8 @@ class AirVLNSimulatorClientTool:
 
             airsim_client.enableApiControl(True)
             airsim_client.armDisarm(True)
-            airsim_client.simSetKinematics(start_state, ignore_collision=False)
             airsim_client.simPause(False)
+            airsim_client.simSetKinematics(start_state, ignore_collision=False)
             action_wall_start = time.perf_counter()
             action_sim_start = None
             state_info = None
@@ -634,6 +635,7 @@ class AirVLNSimulatorClientTool:
                 if collision:
                     break
 
+            airsim_client.moveByVelocityAsync(0, 0, 0, 0.05, drivetrain=drivetrain, yaw_mode=yaw_mode).join()
             final_state_info = copy.deepcopy(state_sensor.retrieve()) if self.fast_eval else state_info
             airsim_client.simPause(True)
             action_wall_ms = (time.perf_counter() - action_wall_start) * 1000.0

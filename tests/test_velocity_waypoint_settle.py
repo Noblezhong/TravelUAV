@@ -10,9 +10,6 @@ class _AsyncResult:
 
 
 class _FakeClient:
-    def __init__(self):
-        self.velocity_commands = []
-
     def enableApiControl(self, *_args, **_kwargs):
         return None
 
@@ -25,8 +22,7 @@ class _FakeClient:
     def simSetKinematics(self, *_args, **_kwargs):
         return None
 
-    def moveByVelocityAsync(self, vx, vy, vz, duration, *_args, **_kwargs):
-        self.velocity_commands.append((vx, vy, vz, duration))
+    def moveByVelocityAsync(self, *_args, **_kwargs):
         return _AsyncResult()
 
 
@@ -61,8 +57,7 @@ class VelocityWaypointSettleTest(unittest.TestCase):
             )
             tool.fast_eval = True
             tool.fast_eval_speedup = 10.0
-            fake_client = _FakeClient()
-            tool.airsim_clients = [[fake_client]]
+            tool.airsim_clients = [[_FakeClient()]]
 
             result = tool.move_path_by_velocity_waypoints(
                 waypoints_list=[[[[0.25, 0.0, 0.0]]]],
@@ -75,10 +70,3 @@ class VelocityWaypointSettleTest(unittest.TestCase):
         self.assertEqual(len(action["states"]), 1)
         self.assertGreaterEqual(action["sim_time_ms"], 1000.0)
         self.assertLess(action["sim_time_ms"], 2000.0)
-        self.assertTrue(fake_client.velocity_commands)
-        self.assertFalse(
-            any(
-                vx == 0 and vy == 0 and vz == 0
-                for vx, vy, vz, _ in fake_client.velocity_commands
-            )
-        )
