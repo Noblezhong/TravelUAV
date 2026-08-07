@@ -937,6 +937,15 @@ def eval(
         pbar = tqdm.tqdm(total=end_iter)
         with open(profile_log_path, "w", encoding="utf-8") as profile_fp:
             episode_idx = 0
+            # The scheduler is created once per eval run (outside the episode
+            # loop) so that a seeded random scheduler draws an independent
+            # decision sequence in every episode; re-creating it per episode
+            # with the same seed would replay the identical action sequence.
+            scheduler_name = str(getattr(args, "scheduler", "rule"))
+            if scheduler_name == "random":
+                scheduler = RandomScheduler(seed=int(getattr(args, "random_seed", 0)))
+            else:
+                scheduler = HybridScheduler()
             while True:
                 env_batchs = eval_env.next_minibatch()
                 if env_batchs is None:
@@ -967,11 +976,6 @@ def eval(
                         active_index = 0
                         active_result: Optional[PlannerResult] = None
                         pending_snapshot: Optional[Snapshot] = None
-                        scheduler_name = str(getattr(args, "scheduler", "rule"))
-                        if scheduler_name == "random":
-                            scheduler = RandomScheduler(seed=int(getattr(args, "random_seed", 0)))
-                        else:
-                            scheduler = HybridScheduler()
                         previous_scheduler_action: Optional[str] = None
 
                         warmup_snapshot = state.build_snapshot(request_counter, control_step)
