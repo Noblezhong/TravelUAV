@@ -85,6 +85,8 @@ class CommonArguments:
     simulator_tool_host: str = field(default="127.0.0.1", metadata={"help": "simulator_tool host"})
     simulator_tool_port: int = field(default=30000, metadata={"help": "simulator_tool port"})
     DDP_MASTER_PORT: int = field(default=20001, metadata={"help": "DDP MASTER_PORT"})
+    scheduler: str = field(default="rule", metadata={"help": "scheduler type in hybrid_eval: rule or random"})
+    random_seed: int = field(default=0, metadata={"help": "seed for the random scheduler"})
 
     continue_start_from_dagger_it: Optional[int] = field(default=None)
     continue_start_from_checkpoint_path: Optional[str] = field(default=None)

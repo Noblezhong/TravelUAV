@@ -3,6 +3,7 @@ import json
 import math
 import logging
 import os
+import random
 import sys
 import threading
 import time
@@ -154,6 +155,31 @@ class HybridScheduler:
             )
 
         return SchedulerDecision(CONTINUE_NO_REQUEST, 0.0, ["low_risk"])
+
+
+class RandomScheduler:
+    """Uniform-random joint-action scheduler (paper baseline).
+
+    At each scheduling epoch it selects one of the four joint actions
+    (STOP/CONTINUE x REQUEST/NO_REQUEST) uniformly at random, as
+    described in the paper (Random switching).  Uses the same decide()
+    interface as HybridScheduler; legality guards (stop-and-request
+    when the buffer is exhausted) are enforced by the eval loop itself.
+    """
+
+    ACTIONS = (STOP_AND_REQUEST, CONTINUE_AND_REQUEST, CONTINUE_NO_REQUEST, STOP_NO_REQUEST)
+
+    def __init__(self, seed: int = 0):
+        self._rng = random.Random(seed)
+
+    def decide(
+        self,
+        buffer_remaining: int,
+        active_state_drift_m: float,
+        planner_has_inflight: bool,
+    ) -> SchedulerDecision:
+        action = self._rng.choice(self.ACTIONS)
+        return SchedulerDecision(action, 0.5, ["random_choice"])
 
 
 def _metric_summary(values):
@@ -941,7 +967,11 @@ def eval(
                         active_index = 0
                         active_result: Optional[PlannerResult] = None
                         pending_snapshot: Optional[Snapshot] = None
-                        scheduler = HybridScheduler()
+                        scheduler_name = str(getattr(args, "scheduler", "rule"))
+                        if scheduler_name == "random":
+                            scheduler = RandomScheduler(seed=int(getattr(args, "random_seed", 0)))
+                        else:
+                            scheduler = HybridScheduler()
                         previous_scheduler_action: Optional[str] = None
 
                         warmup_snapshot = state.build_snapshot(request_counter, control_step)
@@ -1542,7 +1572,7 @@ def eval(
 
 if __name__ == "__main__":
     _set_console_log_message_only()
-    configure_fast_eval_output(args, "rule_based_hybrid")
+    configure_fast_eval_output(args, f"hybrid_{str(getattr(args, 'scheduler', 'rule'))}")
     eval_save_path = args.eval_save_path
     eval_json_path = args.eval_json_path
     dataset_path = args.dataset_path
@@ -1558,9 +1588,10 @@ if __name__ == "__main__":
         raise FileNotFoundError(f"bandwidth trace not found: {trace_path}")
     chunk_waypoints = max(1, int(args.chunk_waypoints))
     bandwidth_trace = BandwidthTrace(trace_path, cycle=True)
+    scheduler_name = str(getattr(args, "scheduler", "rule"))
     logger.info(
         f"Loaded bandwidth trace: {trace_path} ({bandwidth_trace.sample_count} samples), "
-        f"enable_comm_delay={enable_comm_delay}, scheduler=rule"
+        f"enable_comm_delay={enable_comm_delay}, scheduler={scheduler_name}"
     )
 
     setup()
@@ -1581,8 +1612,8 @@ if __name__ == "__main__":
 
     print("Assist setting: always_help --", args.always_help, "    use_gt --", args.use_gt)
 
-    profile_log_path = os.path.join(profile_log_dir, f"hybrid_rule_{args.make_dir_time}.jsonl")
-    summary_path = os.path.join(profile_log_dir, f"hybrid_rule_{args.make_dir_time}_summary.json")
+    profile_log_path = os.path.join(profile_log_dir, f"hybrid_{scheduler_name}_{args.make_dir_time}.jsonl")
+    summary_path = os.path.join(profile_log_dir, f"hybrid_{scheduler_name}_{args.make_dir_time}_summary.json")
 
     eval(
         model_wrapper=model_wrapper,
