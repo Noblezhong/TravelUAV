@@ -91,7 +91,8 @@ class PlannerResult:
 
 STOP_AND_REQUEST = "STOP_AND_REQUEST"
 CONTINUE_AND_REQUEST = "CONTINUE_AND_REQUEST"
-CONTINUE_ONLY = "CONTINUE_ONLY"
+CONTINUE_NO_REQUEST = "CONTINUE_NO_REQUEST"
+STOP_NO_REQUEST = "STOP_NO_REQUEST"
 
 
 @dataclass
@@ -102,75 +103,57 @@ class SchedulerDecision:
 
 
 class HybridScheduler:
+    """Fixed-threshold rule-based scheduler, as specified in Algorithm 1 of the paper.
+
+    Uses only buffer occupancy b_m, state shift Delta_m, and request status f_m
+    (whether a request is in flight).  No oracle distance, no bandwidth/time
+    observation.  When a request is already in flight no new request is issued;
+    the UAV stops and waits for the in-flight result only when the buffer is
+    empty or drift exceeds the stop threshold.
+    """
+
     def __init__(
         self,
         stop_drift_m: float = 3.5,
         request_drift_m: float = 2.5,
         request_buffer_remaining: int = 2,
-        goal_distance_m: float = 25.0,
-        goal_stop_drift_m: float = 2.5,
-        slow_uplink_latency_ms: float = 6000.0,
-        slow_uplink_buffer_remaining: int = 4,
     ):
         self.stop_drift_m = float(stop_drift_m)
         self.request_drift_m = float(request_drift_m)
         self.request_buffer_remaining = int(request_buffer_remaining)
-        self.goal_distance_m = float(goal_distance_m)
-        self.goal_stop_drift_m = float(goal_stop_drift_m)
-        self.slow_uplink_latency_ms = float(slow_uplink_latency_ms)
-        self.slow_uplink_buffer_remaining = int(slow_uplink_buffer_remaining)
 
     def decide(
         self,
         buffer_remaining: int,
         active_state_drift_m: float,
         planner_has_inflight: bool,
-        distance_to_goal: Optional[float],
-        last_uplink_latency_ms: Optional[float],
     ) -> SchedulerDecision:
-        if buffer_remaining <= 0:
-            return SchedulerDecision(STOP_AND_REQUEST, 1.0, ["buffer_empty"])
-
-        if active_state_drift_m >= self.stop_drift_m:
-            return SchedulerDecision(
-                STOP_AND_REQUEST,
-                min(1.0, active_state_drift_m / self.stop_drift_m),
-                [f"state_drift>={self.stop_drift_m:.1f}m"],
-            )
-
-        near_goal = distance_to_goal is not None and distance_to_goal <= self.goal_distance_m
-        if near_goal and active_state_drift_m >= self.goal_stop_drift_m:
-            return SchedulerDecision(
-                STOP_AND_REQUEST,
-                min(1.0, active_state_drift_m / self.stop_drift_m),
-                [f"distance_to_goal<={self.goal_distance_m:.1f}m", f"state_drift>={self.goal_stop_drift_m:.1f}m"],
-            )
-
+        # f_m = 1: a request is in flight, never issue another one.
         if planner_has_inflight:
-            return SchedulerDecision(CONTINUE_ONLY, min(0.8, active_state_drift_m / self.stop_drift_m), ["planner_inflight"])
+            if buffer_remaining <= 0 or active_state_drift_m >= self.stop_drift_m:
+                return SchedulerDecision(
+                    STOP_NO_REQUEST,
+                    min(1.0, active_state_drift_m / self.stop_drift_m),
+                    ["buffer_empty", f"state_drift>={self.stop_drift_m:.1f}m"],
+                )
+            return SchedulerDecision(CONTINUE_NO_REQUEST, 0.0, ["planner_inflight"])
 
-        if buffer_remaining <= self.request_buffer_remaining:
-            return SchedulerDecision(CONTINUE_AND_REQUEST, 0.7, [f"buffer_remaining<={self.request_buffer_remaining}"])
-
-        if active_state_drift_m >= self.request_drift_m:
+        # f_m = 0: request when the buffer is empty or drift is large.
+        if buffer_remaining <= 0 or active_state_drift_m >= self.stop_drift_m:
             return SchedulerDecision(
-                CONTINUE_AND_REQUEST,
-                min(0.9, active_state_drift_m / self.stop_drift_m),
-                [f"state_drift>={self.request_drift_m:.1f}m"],
+                STOP_AND_REQUEST,
+                min(1.0, active_state_drift_m / self.stop_drift_m),
+                ["buffer_empty", f"state_drift>={self.stop_drift_m:.1f}m"],
             )
 
-        slow_uplink = last_uplink_latency_ms is not None and last_uplink_latency_ms >= self.slow_uplink_latency_ms
-        if slow_uplink and buffer_remaining <= self.slow_uplink_buffer_remaining:
+        if buffer_remaining <= self.request_buffer_remaining or active_state_drift_m >= self.request_drift_m:
             return SchedulerDecision(
                 CONTINUE_AND_REQUEST,
-                0.6,
-                [
-                    f"uplink_latency>={self.slow_uplink_latency_ms:.0f}ms",
-                    f"buffer_remaining<={self.slow_uplink_buffer_remaining}",
-                ],
+                0.7,
+                [f"buffer_remaining<={self.request_buffer_remaining}", f"state_drift>={self.request_drift_m:.1f}m"],
             )
 
-        return SchedulerDecision(CONTINUE_ONLY, 0.0, ["low_risk"])
+        return SchedulerDecision(CONTINUE_NO_REQUEST, 0.0, ["low_risk"])
 
 
 def _metric_summary(values):
@@ -1108,10 +1091,6 @@ def eval(
                                     buffer_remaining=buffer_remaining,
                                     active_state_drift_m=_active_state_drift_m(active_result, scheduler_pose),
                                     planner_has_inflight=planner_has_inflight,
-                                    distance_to_goal=state.distance_to_ends[-1] if state.distance_to_ends else None,
-                                    last_uplink_latency_ms=(
-                                        float(active_result.uplink_latency_ms) if active_result is not None else None
-                                    ),
                                 )
 
                                 if scheduler_decision.action == CONTINUE_AND_REQUEST and not state.dones[0]:
@@ -1125,6 +1104,70 @@ def eval(
                                         episode_clock,
                                     )
                                     decision_observation_pose = state.current_sim_pose()
+                                elif scheduler_decision.action == STOP_NO_REQUEST and not state.dones[0]:
+                                    # (STOP, NO_REQUEST): stop and wait for the in-flight
+                                    # result; do not issue a new request.
+                                    hover_wait_start = time.perf_counter()
+                                    hover_logical_start = episode_clock.now_ms
+                                    if planner.has_inflight() and not state.dones[0]:
+                                        applied_result = planner.wait_result()
+                                        hover_wait_ms = (
+                                            episode_clock.now_ms - hover_logical_start
+                                            if episode_clock.enabled
+                                            else (time.perf_counter() - hover_wait_start) * 1000.0
+                                        )
+                                        active_traj = copy.deepcopy(applied_result.refined_waypoints)
+                                        active_index = 0
+                                        active_result = applied_result
+                                        trajectory_switch_applied = True
+                                        current_pose = state.current_sim_pose()
+                                        stop_decision_record = _build_planner_decision_record(
+                                            env_batchs[0],
+                                            applied_result,
+                                            current_pose,
+                                            enable_comm_delay,
+                                            chunk_waypoints,
+                                            decision_step=int(applied_result.request_id),
+                                            clock=episode_clock,
+                                            applied_exec_step=control_step,
+                                        )
+                                        stop_decision_record["hover_wait_ms"] = float(hover_wait_ms)
+                                        stop_decision_record["loop_latency_ms"] = float(hover_wait_ms)
+                                        stop_decision_record["predict_dones"] = [bool(x) for x in state.predict_dones]
+                                        stop_decision_record["collisions"] = [bool(x) for x in state.collisions]
+                                        stop_decision_record["dones"] = [bool(x) for x in state.dones]
+                                        stop_decision_record["stale_result_discarded"] = False
+                                        _add_hybrid_fields(
+                                            stop_decision_record,
+                                            scheduler_decision,
+                                            execution_mode="stop_and_go",
+                                            request_decision=False,
+                                            buffer_remaining=max(0, len(active_traj) - active_index),
+                                            planner_has_inflight=_planner_has_inflight_without_ready(planner),
+                                            active_result=active_result,
+                                            current_pose=current_pose,
+                                            state=state,
+                                            previous_scheduler_action=previous_scheduler_action,
+                                            stop_wait_ms=hover_wait_ms,
+                                            scheduler_countable=False,
+                                            clock=episode_clock,
+                                        )
+                                        _write_jsonl_line(profile_fp, stop_decision_record)
+                                        summary_records.append(stop_decision_record)
+                                        _print_decision_profile_line(episode_idx, applied_result.request_id, stop_decision_record)
+                                        _print_trajectory_bundle(
+                                            episode_idx,
+                                            applied_result.request_id,
+                                            applied_result.llm_output,
+                                            applied_result.refined_waypoints,
+                                            current_pose=current_pose,
+                                        )
+                                    else:
+                                        hover_wait_ms = (
+                                            episode_clock.now_ms - hover_logical_start
+                                            if episode_clock.enabled
+                                            else (time.perf_counter() - hover_wait_start) * 1000.0
+                                        )
                                 elif scheduler_decision.action == STOP_AND_REQUEST and not state.dones[0]:
                                     hover_wait_start = time.perf_counter()
                                     hover_logical_start = episode_clock.now_ms
@@ -1251,7 +1294,7 @@ def eval(
                                 _add_hybrid_fields(
                                     record,
                                     scheduler_decision,
-                                    execution_mode="stop_and_go" if scheduler_decision.action == STOP_AND_REQUEST else "continuous",
+                                    execution_mode="stop_and_go" if scheduler_decision.action in (STOP_AND_REQUEST, STOP_NO_REQUEST) else "continuous",
                                     request_decision=scheduler_decision.action in (STOP_AND_REQUEST, CONTINUE_AND_REQUEST),
                                     buffer_remaining=buffer_remaining,
                                     planner_has_inflight=_planner_has_inflight_without_ready(planner),
@@ -1308,7 +1351,7 @@ def eval(
                                     _add_hybrid_fields(
                                         stop_record,
                                         scheduler_decision,
-                                        execution_mode="stop_and_go" if scheduler_decision.action == STOP_AND_REQUEST else "continuous",
+                                        execution_mode="stop_and_go" if scheduler_decision.action in (STOP_AND_REQUEST, STOP_NO_REQUEST) else "continuous",
                                         request_decision=scheduler_decision.action in (STOP_AND_REQUEST, CONTINUE_AND_REQUEST),
                                         buffer_remaining=max(0, len(active_traj) - active_index),
                                         planner_has_inflight=_planner_has_inflight_without_ready(planner),
@@ -1452,11 +1495,11 @@ def eval(
     scheduler_records = [
         item
         for item in summary_records
-        if item.get("scheduler_countable") and item.get("scheduler_action") in (STOP_AND_REQUEST, CONTINUE_AND_REQUEST, CONTINUE_ONLY)
+        if item.get("scheduler_countable") and item.get("scheduler_action") in (STOP_AND_REQUEST, CONTINUE_AND_REQUEST, CONTINUE_NO_REQUEST, STOP_NO_REQUEST)
     ]
     scheduler_action_counts = {
         action: sum(1 for item in scheduler_records if item.get("scheduler_action") == action)
-        for action in (STOP_AND_REQUEST, CONTINUE_AND_REQUEST, CONTINUE_ONLY)
+        for action in (STOP_AND_REQUEST, CONTINUE_AND_REQUEST, CONTINUE_NO_REQUEST, STOP_NO_REQUEST)
     }
     scheduler_total = sum(scheduler_action_counts.values())
     scheduler_action_ratio = {
