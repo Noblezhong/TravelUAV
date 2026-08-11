@@ -94,6 +94,7 @@ def main():
         batch_size=int(args.scheduler_batch_size),
         gamma=float(args.scheduler_gamma),
         ent_coef=float(args.scheduler_ent_coef),
+        seed=args.scheduler_seed,
         verbose=1,
         tensorboard_log=tb_dir,
         device="cpu",

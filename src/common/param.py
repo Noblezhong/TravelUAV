@@ -71,6 +71,7 @@ class CommonArguments:
     ncn_response_ema_alpha: float = field(default=0.5, metadata={"help": "EMA alpha for predicted edge compute time"})
     ncn_response_safety_margin_ms: float = field(default=0.0, metadata={"help": "extra logical-time margin before NCN takeover"})
     ncn_max_consecutive_actions: int = field(default=200, metadata={"help": "safety cap for consecutive NCN actions while edge guidance is pending"})
+    scheduler_seed: Optional[int] = field(default=None, metadata={"help": "PPO seed for reproducible baseline/pilot runs (None = random)"})
 
     dagger_it: int = field(default=1)
     epochs: int = field(default=10)
