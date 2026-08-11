@@ -313,7 +313,7 @@ class ContinuousEpisodeState:
     """Per-episode state for the Continuous evaluation paradigm.
 
     ============
-    TERMINATION — see ``hybrid_eval.py`` ``ContinuousEpisodeState`` for the
+    TERMINATION — see ``rule_based_eval.py`` ``ContinuousEpisodeState`` for the
     authoritative contract.  This class shares the same three termination
     sources (collision / DINO / NE-trend) plus safety caps.  DO NOT modify
     termination logic here without updating ALL paradigms.

@@ -27,7 +27,7 @@ from src.vlnce_src.comm_delay import (
     calculate_latency_ms,
     estimate_uplink_payload_bits_from_episodes,
 )
-from src.vlnce_src.hybrid_eval import (
+from src.vlnce_src.rule_based_eval import (
     ContinuousEpisodeState,
     PlannerResult,
     Snapshot,
@@ -655,7 +655,7 @@ class DRLSchedulerEnv(gym.Env):
         extra["executed_waypoints"] = 1
 
     # ── TERMINATION ──────────────────────────────────────────────────
-    # Matches the unified contract in hybrid_eval.py ContinuousEpisodeState.
+    # Matches the unified contract in rule_based_eval.py ContinuousEpisodeState.
     # Three sources: collision / DINO (vision) / NE-trend (geometry).
     # oracle_success is a PASSIVE post-hoc flag — NEVER terminates.
     # DO NOT modify without updating ALL paradigms.

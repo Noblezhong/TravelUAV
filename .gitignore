@@ -74,3 +74,8 @@ drl_scheduler_seen_curriculum.json
 drl_scheduler_seen_curriculum_manifest.json
 carla_town_envs
 closeloop_envs
+
+# Experiment artifacts (huge dirs)
+evaluations/
+training/
+models/

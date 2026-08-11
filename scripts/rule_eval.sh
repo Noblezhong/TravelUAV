@@ -1,12 +1,12 @@
 #!/bin/bash
-# Rule-based hybrid UAV-VLN evaluation with communication delay.
+# Rule-based UAV-VLN scheduler evaluation with communication delay.
 
 root_dir=.
 enable_comm_delay=True
 
-CUDA_VISIBLE_DEVICES=0 python -u "$root_dir/src/vlnce_src/hybrid_eval.py" \
+CUDA_VISIBLE_DEVICES=0 python -u "$root_dir/src/vlnce_src/rule_based_eval.py" \
     --run_type eval \
-    --name RuleBasedHybridCom \
+    --name RuleBasedCom \
     --gpu_id 0 \
     --simulator_tool_port 25000 \
     --DDP_MASTER_PORT 80005 \
@@ -20,7 +20,7 @@ CUDA_VISIBLE_DEVICES=0 python -u "$root_dir/src/vlnce_src/hybrid_eval.py" \
     --fast_eval_speedup 10 \
     --comm_trace_csv_path "$root_dir/bandwidth/ucc4g_bandwidth_trace.csv" \
     --dataset_path /HDD2/TravelUAV_dataset/TravelUAV_data/ \
-    --eval_save_path /code/TravelUAV/eval_rule_$(date +%m%d-%H%M)_fast_x10 \
+    --eval_save_path "$root_dir/eval_rule_$(date +%m%d-%H%M)_fast_x10" \
     --model_path "$root_dir/Model/LLaMA-UAV/work_dirs/llama-uav-7b" \
     --model_base "$root_dir/Model/LLaMA-UAV/model_zoo/vicuna-7b-v1.5" \
     --vision_tower "$root_dir/Model/LLaMA-UAV/model_zoo/LAVIS/eva_vit_g.pth" \

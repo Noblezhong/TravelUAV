@@ -333,7 +333,7 @@ class EvalBatchState:
     # Three sources: collision / DINO (vision) / NE-trend (geometry).
     # DINO predicts done + NE > 20 m → early_end flag ONLY (not done).
     # oracle_success is a PASSIVE post-hoc flag — NEVER terminates.
-    # This is the *reference implementation*; hybrid_eval, continue_eval,
+    # This is the *reference implementation*; rule_based_eval, continue_eval,
     # and drl_scheduler_env MUST match this contract.
     # DO NOT modify without updating ALL paradigms.
     # ──────────────────────────────────────────────────────────────────
