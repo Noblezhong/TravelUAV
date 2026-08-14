@@ -7,6 +7,19 @@ from PIL import Image
 from src.vlnce_src.env_uav import RGB_FOLDER, DEPTH_FOLDER
 from collections import deque
 from utils.logger import logger
+
+
+def _latest_obs(records):
+    """Most recent record carrying sensor frames, either key convention.
+    fast_eval history records carry no images; only the latest observation
+    does (rgb_record/depth_record raw keys, or rgb/depth after formatting).
+    Returns None if no record has frames."""
+    for e in reversed(records):
+        if "depth" in e or "rgb" in e or "depth_record" in e or "rgb_record" in e:
+            return e
+    return None
+
+
 class Assist:
     def __init__(self, always_help = False, use_gt = False, device=0):
         self.always_help = always_help
@@ -64,12 +77,24 @@ class Assist:
             diffs = []
             close_collision = False
             current_episode = current_observations[i]
-            for cid, camera_name in enumerate(DEPTH_FOLDER):
-                diff = np.mean(np.abs(prev_episode[-1]['depth'][cid] - current_episode[-1]['depth'][cid]))
-                zero_cnt  = (current_episode[-1]['depth'][cid] <= 1).sum()
-                if zero_cnt > 0.1 * current_episode[-1]['depth'][cid].size:
-                    close_collision = True
+            prev_obs = _latest_obs(prev_episode)
+            cur_obs = _latest_obs(current_episode)
+            if prev_obs is None or cur_obs is None:
+                # no frames available (fast_eval history) -> skip frame check
+                diff = float('inf')
                 diffs.append(diff)
+            else:
+                for cid, camera_name in enumerate(DEPTH_FOLDER):
+                    pd = prev_obs.get('depth') or prev_obs.get('depth_record')
+                    cd = cur_obs.get('depth') or cur_obs.get('depth_record')
+                    if pd is None or cd is None or cid >= len(pd) or cid >= len(cd):
+                        diffs.append(float('inf'))
+                        continue
+                    diff = np.mean(np.abs(pd[cid] - cd[cid]))
+                    zero_cnt  = (cd[cid] <= 1).sum()
+                    if zero_cnt > 0.1 * cd[cid].size:
+                        close_collision = True
+                    diffs.append(diff)
             distance = np.array(prev_episode[-1]["sensors"]["state"]["position"]) - np.array(current_episode[-1]["sensors"]["state"]["position"])
             distance = np.linalg.norm(np.array(distance))
             diffs = np.array(diffs)
@@ -92,8 +117,16 @@ class Assist:
         is_helps = [False for _ in range(len(episodes))]
         for i in range(len(episodes)):
             depth_result = []
-            for cid, camera_name in enumerate(RGB_FOLDER):       
-                img_src = episodes[i][-1]['depth'][cid]
+            obs = _latest_obs(episodes[i])
+            dep = obs.get('depth') or obs.get('depth_record') if obs is not None else None
+            if dep is None:
+                self.depth_results.append([float('inf')] * len(RGB_FOLDER))
+                continue
+            for cid, camera_name in enumerate(RGB_FOLDER):
+                if cid >= len(dep):
+                    depth_result.append(float('inf'))
+                    continue
+                img_src = dep[cid]
                 img_src = np.array(img_src[64:192, 64:192])
                 depth = min(min(row) for row in img_src) / 2.55
                 depth_result.append(depth)
@@ -249,8 +282,15 @@ class Assist:
             self.dino_monitor = DinoMonitor.get_instance()
         for idx, (epi, obj_info) in enumerate(zip(episodes, object_infos)):
             cameras_detect = [False] * len(RGB_FOLDER)
-            for cid, camera_name in enumerate(RGB_FOLDER):       
-                img = Image.fromarray(epi[-1]['rgb'][cid])
+            obs = _latest_obs(epi)
+            rgb_frames = (obs.get('rgb') or obs.get('rgb_record')) if obs is not None else None
+            if rgb_frames is None:
+                target_detections.append(cameras_detect)
+                continue
+            for cid, camera_name in enumerate(RGB_FOLDER):
+                if cid >= len(rgb_frames):
+                    continue
+                img = Image.fromarray(rgb_frames[cid])
                 boxes, _ = self.dino_monitor.detect(img, obj_info)
                 if len(boxes) > 0:
                     cameras_detect[cid] = True

@@ -89,6 +89,7 @@ class AirVLNENV:
         self.eval_json_path = eval_json_path
         self.seed = seed
         self.collected_keys = set()
+        self._last_frames = None  # last-known-good (rgb,depth,state,rec_rgb,rec_depth) per batch slot
         self.dataset_group_by_scene = dataset_group_by_scene
         self.activate_maps = set(activate_maps)
         self.map_area_dict = prepare_object_map()
@@ -329,7 +330,30 @@ class AirVLNENV:
         results = self.simulator_tool.setPoses(poses=poses)
         results = self.simulator_tool.setPoses(poses=poses)
         state_info_results = self.simulator_tool.getSensorInfo()
-        
+        if state_info_results is None:
+            # scene(s) wedged at episode start: seed trajectory from spawn pose instead of dying
+            logger.warning('getSensorInfo failed (scene wedged), seeding trajectory from spawn pose')
+            state_info_results = []
+            _c0 = 0
+            for _i1, _item in enumerate(self.machines_info):
+                state_info_results.append([])
+                for _i2 in range(len(_item['open_scenes'])):
+                    _p, _r = start_position_list[_c0], start_rotation_list[_c0]
+                    state_info_results[_i1].append({'sensors': {'state': {
+                        'position': list(_p), 'orientation': list(_r),
+                        'linear_velocity': [0.0, 0.0, 0.0], 'linear_acceleration': [0.0, 0.0, 0.0],
+                        'angular_velocity': [0.0, 0.0, 0.0], 'angular_acceleration': [0.0, 0.0, 0.0],
+                        'collision': {'has_collided': False, 'object_name': ''},
+                        'gps_location': [0.0, 0.0, 0.0], 'timestamp': 0,
+                    }, 'imu': {
+                        'time_stamp': 0,
+                        'rotation': [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                        'orientation': [0.0, 0.0, 0.0, 1.0],
+                        'linear_acceleration': [0.0, 0.0, 0.0],
+                        'angular_velocity': [0.0, 0.0, 0.0],
+                    }}})
+                    _c0 += 1
+
         cnt = 0
         for index_1, item in enumerate(self.machines_info):
             for index_2, _ in enumerate(item['open_scenes']):
@@ -357,29 +381,56 @@ class AirVLNENV:
         self.sim_states = states
         return obs
 
+    def _fetch_images(self, fetch_func, cameras, role):
+        """Fetch images with one retry. A sporadic AirSim wedge (per-request RPC
+        timeout, retried x4 inside the tool) makes the tool return None — never
+        crash on it; the caller falls back to last-known-good frames."""
+        responses = fetch_func(cameras=cameras)
+        if responses is None:
+            logger.warning(f'{role} 图片抓取失败（AirSim 卡顿），重试一次')
+            time.sleep(2)
+            responses = fetch_func(cameras=cameras)
+        return responses
+
     def _getStates(self):
         # CMA eval only needs front camera — 5x faster image capture
         _cma_cameras = ['FrontCamera'] if os.environ.get('CMA_EVAL_ONLY') == '1' else \
                        ['FrontCamera', 'LeftCamera', 'RightCamera', 'RearCamera', 'DownCamera']
-        responses = self.simulator_tool.getImageResponses(cameras=_cma_cameras)
-        responses_for_record = self.simulator_tool.getImageResponsesForRecord(cameras=['FrontCameraRecord'] if os.environ.get('CMA_EVAL_ONLY') == '1' else ['FrontCameraRecord', 'DownCameraRecord'])
-        cnt = 0
-        for item in responses:
-            cnt += len(item)
-        assert len(responses) == len(self.machines_info), 'error'
-        assert cnt == self.batch_size, 'error'
+        _record_cameras = ['FrontCameraRecord'] if os.environ.get('CMA_EVAL_ONLY') == '1' else \
+                          ['FrontCameraRecord', 'DownCameraRecord']
+        responses = self._fetch_images(self.simulator_tool.getImageResponses, _cma_cameras, 'getImageResponses')
+        responses_for_record = self._fetch_images(self.simulator_tool.getImageResponsesForRecord, _record_cameras, 'getImageResponsesForRecord')
+
+        if responses is not None:
+            cnt = 0
+            for item in responses:
+                cnt += len(item)
+            assert len(responses) == len(self.machines_info), 'error'
+            assert cnt == self.batch_size, 'error'
 
         states = [None for _ in range(self.batch_size)]
         cnt = 0
         for index_1, item in enumerate(self.machines_info):
             for index_2 in range(len(item['open_scenes'])):
-                rgb_images = responses[index_1][index_2][0]
-                depth_images = responses[index_1][index_2][1]
-                rgb_records = responses_for_record[index_1][index_2][0]
-                depth_records = responses_for_record[index_1][index_2][1]
+                if responses is not None and responses_for_record is not None:
+                    rgb_images = responses[index_1][index_2][0]
+                    depth_images = responses[index_1][index_2][1]
+                    rgb_records = responses_for_record[index_1][index_2][0]
+                    depth_records = responses_for_record[index_1][index_2][1]
+                else:
+                    # 某一路抓取仍失败：复用上一帧兜底（record 帧只进 jsonl 不进策略）
+                    if self._last_frames is None:
+                        raise RuntimeError('image fetch failed and no fallback frames yet')
+                    last = self._last_frames
+                    rgb_images = responses[index_1][index_2][0] if responses is not None else last[cnt][0]
+                    depth_images = responses[index_1][index_2][1] if responses is not None else last[cnt][1]
+                    rgb_records = responses_for_record[index_1][index_2][0] if responses_for_record is not None else last[cnt][3]
+                    depth_records = responses_for_record[index_1][index_2][1] if responses_for_record is not None else last[cnt][4]
+                    logger.warning(f'图片抓取兜底复用上一帧 (cnt={cnt})')
                 state = self.sim_states[cnt]
                 states[cnt] = (rgb_images, depth_images, state, rgb_records, depth_records)
                 cnt += 1
+        self._last_frames = states
         return states
     
     def _get_current_state(self) -> list:
