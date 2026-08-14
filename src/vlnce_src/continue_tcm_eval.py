@@ -66,7 +66,7 @@ from src.vlnce_src.fast_eval_time import (
     action_timing,
     configure_fast_eval_output,
 )
-from src.vlnce_src.match_tcm import TcmRuntime, TrajcorrMixin
+from src.vlnce_src.trajcorr_apply import TcmRuntime, TrajcorrMixin
 from utils.logger import logger
 
 
