@@ -21,9 +21,11 @@ class SplitACPolicy(ActorCriticPolicy):
 
     def _actor_obs(self, obs: torch.Tensor) -> torch.Tensor:
         """Return 7-dim tensor with NE (index 6) zeroed for the Actor."""
-        out = obs.clone()
-        out[:, 7] = 0.0
-        return out
+        # Pilot-A: request_age (index 7) unmasked --- the Actor needs
+        # request-schedule memory to learn preventive requesting and the
+        # CONTINUE_REQUEST mode. NE (index 6) stays visible: that is the
+        # load-bearing convergence wall, do NOT mask it.
+        return obs
 
     def _critic_obs(self, obs: torch.Tensor) -> torch.Tensor:
         """Return the full 7-dim tensor including NE for the Critic."""

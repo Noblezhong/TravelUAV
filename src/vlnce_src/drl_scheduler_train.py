@@ -94,11 +94,26 @@ def main():
         batch_size=int(args.scheduler_batch_size),
         gamma=float(args.scheduler_gamma),
         ent_coef=float(args.scheduler_ent_coef),
+        vf_coef=float(getattr(args, "scheduler_vf_coef", 0.5)),
         seed=args.scheduler_seed,
         verbose=1,
         tensorboard_log=tb_dir,
         device="cpu",
     )
+    # ---- Resume support (2026-08-17): continue from latest checkpoint in
+    # scheduler_models/ instead of from scratch. Simulator (CarlaUE4) crashes
+    # every ~3-4h (known Vulkan allocator bug); without resume each crash
+    # wasted the run so far. No experimental parameters changed. ----
+    import glob
+    resume_steps = 0
+    ckpt_files = glob.glob(os.path.join(model_dir, "ppo_checkpoint_*_steps.zip"))
+    if ckpt_files:
+        resume_steps = max(int(os.path.basename(p).split("_")[2]) for p in ckpt_files)
+        resume_from = os.path.join(model_dir, f"ppo_checkpoint_{resume_steps}_steps.zip")
+        print(f"[resume] {len(ckpt_files)} checkpoints found, resuming from {resume_steps} steps: {resume_from}")
+        scheduler = PPO.load(resume_from, env=monitored_env, device="cpu")
+    else:
+        print("[resume] no checkpoint found, training from scratch")
     checkpoint_callback = CheckpointCallback(
         save_freq=500,
         save_path=model_dir,
@@ -110,7 +125,7 @@ def main():
         verbose=1,
     )
     scheduler.learn(
-        total_timesteps=int(args.scheduler_total_timesteps),
+        total_timesteps=int(args.scheduler_total_timesteps) - resume_steps,
         tb_log_name="ppo_scheduler",
         callback=[checkpoint_callback, episode_callback],
     )

@@ -60,6 +60,7 @@ class CommonArguments:
     scheduler_drift_weight: float = field(default=1.0, metadata={"help": "reward weight for scheduler state drift increase"})
     scheduler_time_drift_weight: float = field(default=1.0, metadata={"help": "reward weight for scheduler time drift increase"})
     scheduler_request_weight: float = field(default=0.05, metadata={"help": "reward penalty for edge VLM request"})
+    scheduler_request_bw_weight: float = field(default=0.0, metadata={"help": "bandwidth-aware request penalty: penalty scales with clip(100/bw_mbps,0.25,8), low-bandwidth requests cost more"})
     scheduler_success_reward: float = field(default=40.0, metadata={"help": "terminal reward for SR navigation success"})
     scheduler_oracle_success_reward: float = field(default=20.0, metadata={"help": "terminal reward for OSR-only navigation success"})
     scheduler_collision_penalty: float = field(default=20.0, metadata={"help": "terminal penalty for collision"})
@@ -71,6 +72,7 @@ class CommonArguments:
     ncn_response_ema_alpha: float = field(default=0.5, metadata={"help": "EMA alpha for predicted edge compute time"})
     ncn_response_safety_margin_ms: float = field(default=0.0, metadata={"help": "extra logical-time margin before NCN takeover"})
     ncn_max_consecutive_actions: int = field(default=200, metadata={"help": "safety cap for consecutive NCN actions while edge guidance is pending"})
+    scheduler_vf_coef: float = field(default=0.5, metadata={"help": "PPO value function coefficient (0.2 = stabilized Critic)"})
     scheduler_seed: Optional[int] = field(default=None, metadata={"help": "PPO seed for reproducible baseline/pilot runs (None = random)"})
 
     dagger_it: int = field(default=1)

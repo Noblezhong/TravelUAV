@@ -146,18 +146,31 @@ def wait_for_fast_edge_worker_if_due(
             raise error
 
 
+MIN_FAST_EVAL_SIM_MS = 10.0  # one AirSim physics tick (0.01 s)
+
+
 def action_timing(eval_env, measured_wall_ms: float, fast_eval: bool) -> Dict[str, float]:
     wall_ms = float(measured_wall_ms)
     timings = getattr(eval_env, "last_action_timings", None) or []
     sim_values = [float(item.get("sim_time_ms", 0.0)) for item in timings if item]
     sim_ms = max(sim_values) if sim_values else wall_ms
-    if fast_eval and sim_ms <= 0:
-        raise RuntimeError("Fast Eval requires a positive AirSim simulated action duration")
-    return {
+    clamped = False
+    if fast_eval:
+        if sim_ms <= 0:
+            # Zero-duration AirSim action: the UAV stalls close to the target and the
+            # move completes within a single physics tick, so the sim timestamp does
+            # not advance. The fast-eval logical clock must still move forward, so
+            # clamp to one physics tick (the action is degenerate, not free).
+            sim_ms = max(MIN_FAST_EVAL_SIM_MS, wall_ms)
+            clamped = True
+    result = {
         "action_wall_time_ms": wall_ms,
         "action_sim_time_ms": sim_ms,
         "airsim_action_latency_ms": sim_ms if fast_eval else wall_ms,
     }
+    if clamped:
+        result["sim_time_clamped_zero"] = True
+    return result
 
 
 def configure_fast_eval_output(args, paradigm: str) -> Optional[str]:
