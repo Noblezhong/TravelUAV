@@ -252,7 +252,8 @@ def prepare_data_to_inputs(episodes, tokenizer, image_processor, data_args, targ
     images = np.stack(images, axis=0)
     image = processor.preprocess(images, return_tensors='pt')['pixel_values']
     
-    conversation_for_human = '<image>\n' + sources[-1]['instruction']
+    _instr = next((_s.get('instruction') for _s in reversed(sources) if isinstance(_s, dict) and _s.get('instruction')), '')
+    conversation_for_human = '<image>\n' + _instr
     conversation = [
     {
         "from": "human",

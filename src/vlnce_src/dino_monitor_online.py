@@ -47,8 +47,14 @@ class DinoMonitor:
         self.dino_model = partial(predict, model=model)
     
     def get_dino_results(self, episode, obj_info):
-        images = episode[-1]['rgb_record']
-        depths = episode[-1]['depth_record']
+        # Episode may contain trajectory-history records without sensor images
+        # (only the latest observation in _format_obs_at gets rgb_record/depth_record).
+        # Use the most recent record that actually carries images.
+        latest = next((e for e in reversed(episode) if 'rgb_record' in e), None)
+        if latest is None:
+            return False
+        images = latest['rgb_record']
+        depths = latest['depth_record']
         done = False
         
         for i in range(len(images)):

@@ -300,7 +300,9 @@ class VectorEnvUtil:
     def _format_obs_at(self, index: int, teacher_waypoints, done, oracle_success):
         rgb_images, depth_images, sim_state, rgb_records, depth_records = self.obs_states[index]
         observations = [info for info in sim_state.trajectory[-5:]]
-        observations[-1]['instruction'] = sim_state.raw_trajectory_info['instruction']
+        _instr = sim_state.raw_trajectory_info.get('instruction', '')
+        for _o in observations:
+            _o['instruction'] = _instr
         observations[-1]['trajectory_dir'] = sim_state.raw_trajectory_info['trajectory_dir']
         observations[-1]['teacher_action'] = teacher_waypoints
         observations[-1]['rgb'] = rgb_images

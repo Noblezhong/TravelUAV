@@ -160,15 +160,59 @@ class FixedBandwidthEdgePlanner:
                 assert job is not None
                 self._results.put(self._run_job(job))
             except Exception as exc:
-                logger.error(f"DRL scheduler planner failed: {exc}")
+                # 偶发异常绝不能吞掉结果：主循环在 wait_result 上无限阻塞会挂死整个评估。
+                # 记全量 traceback 便于定位，并放一个空航点失败结果保持请求链不断。
+                logger.error(f"DRL scheduler planner failed: {exc}", exc_info=True)
+                try:
+                    self._results.put(self._failed_result(job))
+                except Exception:
+                    logger.error("failed to enqueue planner failure result", exc_info=True)
             finally:
                 with self._cond:
                     self._running = False
                     self._cond.notify_all()
 
+    def _failed_result(self, job) -> PlannerResult:
+        """Planner 异常时的占位结果：空航点、零延迟，让主循环解除阻塞、该决策按无输出继续。"""
+        snap = job.snapshot if job is not None else None
+        rid = int(getattr(snap, "request_id", -1))
+        step = int(getattr(snap, "submitted_step", 0))
+        ts = int(getattr(snap, "observation_timestamp", 0))
+        pose = copy.deepcopy(getattr(snap, "observation_pose", [0.0, 0.0, 0.0]))
+        submitted_perf = float(getattr(snap, "submitted_perf_time", 0.0))
+        submitted_wall = float(getattr(snap, "submitted_wall_time", 0.0))
+        logical = getattr(snap, "submitted_logical_ms", None)
+        return PlannerResult(
+            request_id=rid,
+            submitted_step=step,
+            observation_timestamp=ts,
+            observation_pose=pose,
+            submitted_perf_time=submitted_perf,
+            submitted_wall_time=submitted_wall,
+            ready_wall_time=time.time(),
+            obs_latency_ms=0.0,
+            groundingdino_latency_ms=0.0,
+            llm_latency_ms=0.0,
+            traj_latency_ms=0.0,
+            uplink_payload_bits=0,
+            uplink_payload_mb=0.0,
+            uplink_bandwidth_mbps=0.0,
+            uplink_latency_ms=0.0,
+            llm_output=[],
+            refined_waypoints=[],
+            submitted_logical_ms=logical,
+            edge_arrival_logical_ms=None,
+            ready_logical_ms=logical,
+        )
+
     def _run_job(self, job: DRLPlannerJob) -> PlannerResult:
         snapshot = job.snapshot
         episodes = copy.deepcopy([snapshot.episode])
+        for _ep in episodes:
+            _fallback = next((_s.get("instruction") for _s in _ep if isinstance(_s, dict) and _s.get("instruction")), "")
+            for _s in _ep:
+                if isinstance(_s, dict) and not _s.get("instruction"):
+                    _s["instruction"] = _fallback
         payload_bytes, payload_bits, payload_mb = estimate_uplink_payload_bits_from_episodes(episodes)
         uplink_latency_ms = calculate_latency_ms(payload_bits, job.bandwidth_bps) if self.enable_comm_delay else 0.0
         timing_start = snapshot.planner_started_logical_ms
@@ -290,6 +334,12 @@ class DRLSchedulerEnv(gym.Env):
         self.episode_start_perf = time.perf_counter()
         self.state = ContinuousEpisodeState(self.env_batch[0], self.eval_env, self.assist, ignore_tiny_diff=True)
         self.clock.reset()
+        # 每集带宽起点按场景哈希固定 + 按（逻辑）时间推进：
+        # 同一场景在任何运行、任何时刻都看到同一带宽曲线（跨范式公平的前提）
+        _seq = self.env_batch[0].get("seq_name") if self.env_batch else None
+        if _seq is not None:
+            self.bandwidth_trace.reset_for_episode(_seq)
+        self._bw_t0_ms = float(self.clock.now_ms) if self.clock.enabled else time.perf_counter() * 1000.0
         self.planner = FixedBandwidthEdgePlanner(self.model_wrapper, self.enable_comm_delay, clock=self.clock)
         self.active_traj = []
         self.active_index = 0
@@ -307,6 +357,15 @@ class DRLSchedulerEnv(gym.Env):
         wait_start = time.perf_counter()
         wait_logical_start = self.clock.now_ms
         result = self.planner.wait_result()
+        # 上一集结束时若仍有异步请求在途（CONTINUE_REQUEST 不等待），其残留结果
+        # 会先出队并被误用为本集的冷启动航点——跨集污染且不可复现。逐条丢弃，
+        # 直到拿到本次冷启动请求的结果；正常路径首条即匹配，行为完全不变。
+        while int(result.request_id) != int(snapshot.request_id):
+            logger.warning(
+                f"discarding stale planner result request_id={int(result.request_id)} "
+                f"(expect {int(snapshot.request_id)}) at episode cold start"
+            )
+            result = self.planner.wait_result()
         wait_ms = (
             self.clock.now_ms - wait_logical_start
             if self.clock.enabled
@@ -432,6 +491,7 @@ class DRLSchedulerEnv(gym.Env):
             state_drift_delta_m=state_drift_delta_m,
             time_drift_delta_ms=effective_time_drift_ms,
             request_edge=request_bw is not None,
+            request_stop=bool(motion_stop and request_bw is not None),
             terminated=terminated,
             terminal_reason=terminal_reason,
             action_illegal=action_illegal,
@@ -515,7 +575,14 @@ class DRLSchedulerEnv(gym.Env):
         return True, None
 
     def _sample_bandwidth(self) -> float:
-        self.last_observed_bandwidth_bps = float(self.bandwidth_trace.next_bandwidth_bps())
+        # 按（逻辑）时间对齐采样：带宽 = trace[本集起点 + 已过逻辑秒]，而非按步数推进。
+        # 悬停长等待期间时间照样流逝，策略看到的是真实时间轴上的网络演化。
+        now_ms = (
+            float(self.clock.now_ms) if self.clock.enabled
+            else time.perf_counter() * 1000.0
+        )
+        elapsed_ms = now_ms - getattr(self, "_bw_t0_ms", now_ms)
+        self.last_observed_bandwidth_bps = float(self.bandwidth_trace.bandwidth_at_ms(elapsed_ms))
         return self.last_observed_bandwidth_bps
 
     def _apply_result(self, result: PlannerResult) -> None:
@@ -690,6 +757,7 @@ class DRLSchedulerEnv(gym.Env):
         action_illegal: bool = False,
         oracle_success: bool = False,
         dino_overhead_ms: float = 0.0,
+        request_stop: bool = False,
     ) -> Tuple[float, Dict[str, float]]:
         ne_progress_reward = float(args.scheduler_ne_progress_weight) * float(
             np.clip(ne_progress_m / float(args.scheduler_ne_norm_m), -1.0, 1.0)
@@ -702,6 +770,15 @@ class DRLSchedulerEnv(gym.Env):
         drift_penalty = -float(args.scheduler_drift_weight) * state_drift_delta_m / float(args.scheduler_drift_norm_m)
         time_drift_penalty = -float(args.scheduler_time_drift_weight) * time_drift_delta_ms / float(args.scheduler_time_drift_norm_ms)
         request_penalty = -float(args.scheduler_request_weight) if request_edge else 0.0
+        request_bw_penalty = 0.0
+        # Pilot-B: bandwidth penalty applies ONLY to STOP+REQUEST
+        # (hovering to upload wastes time); CONTINUE+REQUEST flies
+        # while uploading, so its request stays cheap -> policy should
+        # learn low-bandwidth preventive requests instead of none.
+        if request_edge and request_stop and float(getattr(args, "scheduler_request_bw_weight", 0.0)) > 0.0:
+            bw_mbps = float(self.last_observed_bandwidth_bps) / 1e6
+            bw_factor = float(np.clip(100.0 / max(bw_mbps, 1e-6), 0.25, 8.0))
+            request_bw_penalty = -float(args.scheduler_request_bw_weight) * bw_factor
         illegal_penalty = -float(args.scheduler_illegal_action_penalty) if action_illegal else 0.0
         terminal_reward = 0.0
         if terminated:
@@ -715,13 +792,14 @@ class DRLSchedulerEnv(gym.Env):
                 terminal_reward = float(args.scheduler_oracle_success_reward)
             elif terminal_reason in ("max_waypoints", "max_scheduler_steps", "done"):
                 terminal_reward = -float(args.scheduler_failure_penalty)
-        reward = ne_progress_reward + time_penalty + drift_penalty + time_drift_penalty + request_penalty + illegal_penalty + terminal_reward
+        reward = ne_progress_reward + time_penalty + drift_penalty + time_drift_penalty + request_penalty + request_bw_penalty + illegal_penalty + terminal_reward
         return reward, {
             "ne_progress": ne_progress_reward,
             "time": time_penalty,
             "state_drift_delta": drift_penalty,
             "time_drift_delta": time_drift_penalty,
             "request": request_penalty,
+            "request_bw": request_bw_penalty,
             "illegal_action": illegal_penalty,
             "terminal": terminal_reward,
         }

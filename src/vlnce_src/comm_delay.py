@@ -46,6 +46,12 @@ class BandwidthTrace:
             self._index = 0
         return value
 
+    def bandwidth_at_ms(self, elapsed_ms: float) -> float:
+        """时间对齐取带宽：trace 每样本 1 秒，以当前 _index（每集由 reset_for_episode
+        哈希固定）为起点，按已过（逻辑）时间推进——与步数/请求数彻底解耦。"""
+        idx = (self._index + int(max(0.0, elapsed_ms) // 1000.0)) % self.sample_count
+        return self.samples_bps[idx]
+
     def reset(self, index=0):
         self._index = int(index) % self.sample_count
 

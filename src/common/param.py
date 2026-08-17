@@ -59,6 +59,7 @@ class CommonArguments:
     scheduler_drift_weight: float = field(default=1.0, metadata={"help": "reward weight for scheduler state drift increase"})
     scheduler_time_drift_weight: float = field(default=1.0, metadata={"help": "reward weight for scheduler time drift increase"})
     scheduler_request_weight: float = field(default=0.05, metadata={"help": "reward penalty for edge VLM request"})
+    scheduler_request_bw_weight: float = field(default=0.0, metadata={"help": "bandwidth-aware request penalty: penalty scales with clip(100/bw_mbps,0.25,8), low-bandwidth requests cost more"})
     scheduler_success_reward: float = field(default=40.0, metadata={"help": "terminal reward for SR navigation success"})
     scheduler_oracle_success_reward: float = field(default=20.0, metadata={"help": "terminal reward for OSR-only navigation success"})
     scheduler_collision_penalty: float = field(default=20.0, metadata={"help": "terminal penalty for collision"})
@@ -66,6 +67,7 @@ class CommonArguments:
     scheduler_illegal_action_penalty: float = field(default=5.0, metadata={"help": "penalty for choosing an illegal action in the current state"})
     scheduler_idle_wait_ms: float = field(default=100.0, metadata={"help": "small hover duration for STOP_NO_REQUEST when no request is in flight"})
     scheduler_ent_coef: float = field(default=0.01, metadata={"help": "PPO entropy coefficient for exploration"})
+    scheduler_vf_coef: float = field(default=0.5, metadata={"help": "PPO value function coefficient (0.2 = stabilized Critic)"})
     scheduler_seed: Optional[int] = field(default=None, metadata={"help": "PPO seed for reproducible baseline/pilot runs (None = random)"})
 
     dagger_it: int = field(default=1)

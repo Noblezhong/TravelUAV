@@ -170,7 +170,9 @@ class AirVLNSimulatorClientTool:
         self.airsim_clients = [[None for _ in list(item['open_scenes'])] for item in self.machines_info]
         return
 
-    def run_call(self, airsim_timeout: int=60) -> None:
+    def run_call(self, airsim_timeout: int=30) -> None:
+        # 30s (was 60): a wedged scene's RPC timeout x4 stalled training ~4min;
+        # callers now fall back to last frames, so faster timeout = faster recovery.
         socket_clients = []
         for index, item in enumerate(self.machines_info):
             socket_clients.append(
@@ -300,6 +302,34 @@ class AirVLNSimulatorClientTool:
         except Exception as e:
             logger.error(e)
 
+    @staticmethod
+    def _no_move_result(start_state):
+        """Fabricate a no-move step result for a wedged scene (no RPCs; uses the
+        last-known-good pose passed in). Keeps training/eval alive instead of
+        crashing on move-path failures during an AirSim wedge."""
+        p, o = start_state.position, start_state.orientation
+        v, a = start_state.linear_velocity, start_state.angular_velocity
+        state = {
+            'position': [p.x_val, p.y_val, p.z_val],
+            'orientation': [o.x_val, o.y_val, o.z_val, o.w_val],
+            'linear_velocity': [v.x_val, v.y_val, v.z_val],
+            'linear_acceleration': [0.0, 0.0, 0.0],
+            'angular_velocity': [a.x_val, a.y_val, a.z_val],
+            'angular_acceleration': [0.0, 0.0, 0.0],
+            'collision': {'has_collided': False, 'object_name': ''},
+            'gps_location': [0.0, 0.0, 0.0],
+            'timestamp': 0,
+        }
+        imu = {
+            'time_stamp': 0,
+            'rotation': [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            'orientation': [0.0, 0.0, 0.0, 1.0],
+            'linear_acceleration': [0.0, 0.0, 0.0],
+            'angular_velocity': [0.0, 0.0, 0.0],
+        }
+        return {'states': [{'sensors': {'state': state, 'imu': imu}}],
+                'collision': False, 'wall_time_ms': 0.0, 'sim_time_ms': 0.0}
+
     def move_path_by_waypoints(self, waypoints_list, start_states, target_idx=5):
         velocity = 1
         drivetrain = airsim.DrivetrainType.ForwardOnly
@@ -389,19 +419,17 @@ class AirVLNSimulatorClientTool:
         for index_1, _ in enumerate(threads):
             result_poses_list.append([])
             for index_2, _ in enumerate(threads[index_1]):
-                result =  threads[index_1][index_2].get_result()
-                result_poses_list[index_1].append(
-                    result
-                )
+                result = threads[index_1][index_2].get_result()
                 if result is None:
                     error_flag = True
+                    # scene wedged (RPC timeouts): no-move fallback keeps training/eval alive
+                    result = self._no_move_result(start_states[index_1][index_2])
+                    logger.warning('move path by waypoints failed (scene wedged), no-move fallback applied')
+                result_poses_list[index_1].append(result)
                 thread_results.append(threads[index_1][index_2].flag_ok)
         threads = []
-        if not (np.array(thread_results) == True).all():
-            logger.error('move path by waypoints failed.')
-            return None
         if error_flag:
-            return None
+            logger.error('move path by waypoints failed (fallback applied).')
         return result_poses_list
 
     def move_to_position(self, target_poses, start_states):
@@ -505,16 +533,16 @@ class AirVLNSimulatorClientTool:
             result_poses_list.append([])
             for index_2, _ in enumerate(threads[index_1]):
                 result = threads[index_1][index_2].get_result()
-                result_poses_list[index_1].append(result)
                 if result is None:
                     error_flag = True
+                    # scene wedged (RPC timeouts): no-move fallback keeps training/eval alive
+                    result = self._no_move_result(start_states[index_1][index_2])
+                    logger.warning('move to position failed (scene wedged), no-move fallback applied')
+                result_poses_list[index_1].append(result)
                 thread_results.append(threads[index_1][index_2].flag_ok)
         threads = []
-        if not (np.array(thread_results) == True).all():
-            logger.error('move to position failed.')
-            return None
         if error_flag:
-            return None
+            logger.error('move to position failed (fallback applied).')
         return result_poses_list
 
     def move_path_by_velocity_waypoints(self, waypoints_list, start_states, target_idx=1):
@@ -678,16 +706,16 @@ class AirVLNSimulatorClientTool:
             result_poses_list.append([])
             for index_2, _ in enumerate(threads[index_1]):
                 result = threads[index_1][index_2].get_result()
-                result_poses_list[index_1].append(result)
                 if result is None:
                     error_flag = True
+                    # scene wedged (RPC timeouts): no-move fallback keeps training/eval alive
+                    result = self._no_move_result(start_states[index_1][index_2])
+                    logger.warning('move path by velocity waypoints failed (scene wedged), no-move fallback applied')
+                result_poses_list[index_1].append(result)
                 thread_results.append(threads[index_1][index_2].flag_ok)
         threads = []
-        if not (np.array(thread_results) == True).all():
-            logger.error('move path by velocity waypoints failed.')
-            return None
         if error_flag:
-            return None
+            logger.error('move path by velocity waypoints failed (fallback applied).')
         return result_poses_list
     
     def setPoses(self, poses: list) -> bool:
