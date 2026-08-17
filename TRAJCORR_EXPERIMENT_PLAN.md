@@ -1,54 +1,49 @@
-# Trajectory Correction Experiment Plan — Current Handoff
+# Trajectory Correction Experiment Plan — Active Handoff
 
-**Updated:** 2026-08-03
-**4090 evaluation code:** `/HDD1/code/TravelUAV_eval_fix`
-**Jetson evaluation code:** `/home/zt/code/TravelUAV_eval_fix`
-**Frozen commit:** `3a516d39d798e46a90877f08ed226f5407c396d6`
+**Updated:** 2026-08-05  
+**4090 edge code:** `/HDD1/code/TravelUAV_eval_fix`  
+**Jetson evaluator code:** `/home/zt/code/TravelUAV_eval_fix`  
+**Frozen evaluator commit:** `3a516d39d798e46a90877f08ed226f5407c396d6`  
 **Shared controller blob:** `087da90de51d132dac5de6d82a3cbd867385be38`
 
 ## Objective
 
-Test C2 with the paired difference TC-ON minus TC-OFF on the same 4090+Jetson deployment. Stop, Continuous, and PPO may appear in the complete-system comparison, but they do not replace this paired module comparison.
+Test correction claim C2 through the paired full-TC-ON minus TC-OFF difference on the same 4090+Jetson deployment. TC is one complete module: current-state trajectory regeneration, target lock, request handling, waypoint filtering and safe refresh behavior are evaluated together.
 
-## Frozen boundary
+## Fixed boundary
 
-- 1,418 identical episodes; manifest SHA256 `af5b7b660ed3b1dea95b53aa72a98f74ae7a37cd381aa0e818ee2a343cf54552`;
-- same trace and per-`seq_name` reset;
-- fixed x10 logical-time semantics with `applied_logical_ms >= ready_logical_ms`;
-- same edge VLM and Jetson trajectory-DNN weights;
-- same controller blob, 1,000-waypoint budget, success/collision/NE, and termination rules.
+- 1,418 episode manifest SHA256 `af5b7b660ed3b1dea95b53aa72a98f74ae7a37cd381aa0e818ee2a343cf54552`;
+- same bandwidth trace/reset, edge VLM and Jetson trajectory-DNN weights;
+- fixed x10 logical-time semantics; `applied_logical_ms >= ready_logical_ms` for every result;
+- same shared controller, 1,000-waypoint budget, success/collision/NE and termination rules.
 
-## Validation already passed
+## Timing validation already passed
 
-- fixed-x10 TC-OFF 50-episode audit: zero early applications and zero logical-time monotonicity violations;
-- post-controller smoke: 16 trajectory results, zero early applications, 12 positive RPC barrier waits;
-- the TC-ON pilot was stopped by user decision because the common barrier path had already been validated;
-- x1 is intentionally not run, so no x10-versus-x1 equivalence claim is allowed.
+- corrected TC-OFF audit: zero early applications and zero logical-time monotonicity violations;
+- post-controller smoke: 16 results, zero early applications and 12 positive real-RPC barrier waits;
+- x1 is intentionally not run, therefore do not claim x10 and x1 are empirically equivalent;
+- no new TC-ON pilot is needed: it traverses the same corrected timing path.
 
-## Current state
+## Active run — do not modify
 
-- TC-OFF corrected full: RUNNING in Jetson tmux `tc_off_full1418_unified_3a516d3`.
-  Output: `/home/zt/traveluav_eval_shared/eval_trajcorr_off_unified_controller_full1418_20260803_fast_x10`.
-- TC-ON old x10: COMPLETE but diagnostic only because it predates the Fast Eval barrier fix.
-- TC-ON corrected full: DEFERRED in the current round.
+- **Corrected TC-OFF full, 1,418:** Jetson tmux `tc_off_full1418_unified_3a516d3`.
+- Output: `/home/zt/traveluav_eval_shared/eval_trajcorr_off_unified_controller_full1418_20260803_fast_x10`.
+- 4090 must keep AirSim and `tc_on_edge` running while Jetson evaluates.
 
-## Next task
+## Immediately after TC-OFF finishes
 
-1. Let corrected TC-OFF finish without changing runtime code.
-2. Validate 1,418 unique episode ends, manifest/trace/controller hashes, zero early application, monotonic logical time, and barrier timing.
-3. Freeze corrected TC-OFF as the asynchronous baseline.
-4. Before making the final C2 claim, run same-version TC-ON on the same 1,418 episodes and build a paired report.
-5. Report paired SR/OSR transitions, collision, NE, E2E, control steps, time shift, and state drift.
+1. Audit 1,418 unique terminal episodes, manifest/trace/controller hashes, terminal metrics, zero early applications, logical-time monotonicity, and edge-barrier fields.
+2. Freeze this output as the corrected TC-OFF baseline.
+3. Start **corrected TC-ON full, 1,418** with the same configuration and a new empty output directory. No small pilot is required.
+4. Audit TC-ON identically, then produce paired TC-ON–OFF SR/OSR transitions, CR, NE, control steps, E2E, blocking stall, time shift and state drift.
 
-## Paper result contract
+## Paper reporting
 
-Primary columns: SR, OSR, CR, NE, control steps, episode E2E, time shift, and state drift.
+The main table has no Deployment column. Place TC-OFF and corrected TC-ON in their own TC row section with navigation accuracy and system-performance column groups. Old TC-ON x10 is diagnostic only and must not fill the final TC-ON row. Raw `Avg T_dec` and `Avg T_action` stay out of the main table.
 
-Remove raw `Avg T_dec` and `Avg T_action` from the main table. The old TC `T_dec` used only uplink plus edge-VLM latency, while other evaluators included more components; raw action time also uses different event units. If needed, report observation+DINO, uplink, edge VLM, Jetson DNN, barrier wait, and action simulation time per waypoint in an appendix.
+## Do not do
 
-## Do not do now
-
-- do not restart or modify the running TC-OFF evaluator;
-- do not use old TC-ON as the paper-ready counterpart to corrected TC-OFF;
-- do not claim fixed-x10 is empirically equivalent to x1;
-- do not overwrite any result directory.
+- Do not stop, restart or alter active TC-OFF.
+- Do not overwrite the active result directory.
+- Do not use old TC-ON as the causal partner of corrected TC-OFF.
+- Do not run x1 or another TC-ON pilot before the required corrected TC-ON full run.
