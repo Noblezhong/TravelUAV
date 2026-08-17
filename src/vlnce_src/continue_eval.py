@@ -531,6 +531,7 @@ class LatestOnlyEdgePlanner:
         self.enable_comm_delay = enable_comm_delay
         self.clock = clock or FastEvalClock(False)
         self.fast_eval = bool(self.clock.enabled)
+        self._bw_t0_ms = float(self.clock.now_ms)  # episode logical-time origin
         self._condition = threading.Condition()
         self._pending_snapshot: Optional[Snapshot] = None
         self._result: Optional[PlannerResult] = None
@@ -630,11 +631,15 @@ class LatestOnlyEdgePlanner:
     def _run_snapshot(self, snapshot: Snapshot) -> PlannerResult:
         episodes = [snapshot.episode]
         payload_bytes, payload_bits, payload_mb = estimate_uplink_payload_bits_from_episodes(episodes)
-        bandwidth_bps = self.bandwidth_trace.next_bandwidth_bps()
-        uplink_latency_ms = calculate_latency_ms(payload_bits, bandwidth_bps) if self.enable_comm_delay else 0.0
         timing_start = snapshot.planner_started_logical_ms
         if timing_start is None:
             timing_start = snapshot.submitted_logical_ms
+        if timing_start is not None:
+            bw_at = float(timing_start) - self._bw_t0_ms
+        else:
+            bw_at = float(self.clock.now_ms) - self._bw_t0_ms
+        bandwidth_bps = self.bandwidth_trace.bandwidth_at_ms(bw_at)
+        uplink_latency_ms = calculate_latency_ms(payload_bits, bandwidth_bps) if self.enable_comm_delay else 0.0
         if self.fast_eval and timing_start is not None:
             with self._condition:
                 self._edge_arrival_logical_ms = float(timing_start + uplink_latency_ms)

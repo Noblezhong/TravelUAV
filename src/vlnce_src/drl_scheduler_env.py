@@ -269,7 +269,8 @@ class DRLSchedulerEnv(gym.Env):
         self.episode_idx = -1
         self.episode_start_perf = 0.0
         self.clock = FastEvalClock(bool(args.fast_eval), args.fast_eval_speedup)
-        self.last_observed_bandwidth_bps = float(self.bandwidth_trace.next_bandwidth_bps())
+        self.last_observed_bandwidth_bps = float(self.bandwidth_trace.bandwidth_at_ms(0.0))
+        self._bw_t0_ms = 0.0  # set per episode in reset()
         self.closed = False
         self._safety_last_threshold: Optional[float] = None
         self._last_request_step: int = 0  # step counter of last VLM request submission
@@ -290,6 +291,13 @@ class DRLSchedulerEnv(gym.Env):
         self.episode_start_perf = time.perf_counter()
         self.state = ContinuousEpisodeState(self.env_batch[0], self.eval_env, self.assist, ignore_tiny_diff=True)
         self.clock.reset()
+        # Per-episode bandwidth anchor: hash-fixed trace start + episode
+        # logical-time origin, so bandwidth follows logical time and is
+        # identical across paradigms for the same scene at the same time.
+        _seq = self.env_batch[0].get("seq_name") if self.env_batch else None
+        if _seq is not None:
+            self.bandwidth_trace.reset_for_episode(_seq)
+        self._bw_t0_ms = float(self.clock.now_ms)
         self.planner = FixedBandwidthEdgePlanner(self.model_wrapper, self.enable_comm_delay, clock=self.clock)
         self.active_traj = []
         self.active_index = 0
@@ -515,7 +523,8 @@ class DRLSchedulerEnv(gym.Env):
         return True, None
 
     def _sample_bandwidth(self) -> float:
-        self.last_observed_bandwidth_bps = float(self.bandwidth_trace.next_bandwidth_bps())
+        elapsed_ms = float(self.clock.now_ms) - float(getattr(self, "_bw_t0_ms", 0.0))
+        self.last_observed_bandwidth_bps = float(self.bandwidth_trace.bandwidth_at_ms(elapsed_ms))
         return self.last_observed_bandwidth_bps
 
     def _apply_result(self, result: PlannerResult) -> None:

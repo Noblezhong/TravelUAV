@@ -102,6 +102,10 @@ def eval(
                 episode_ok = False
                 for retry_i in range(3):
                     try:
+                        if len(env_batchs) != 1:
+                            raise RuntimeError(
+                                f"time-anchored bandwidth requires single-episode batches, got {len(env_batchs)}"
+                            )
                         for env_batch in env_batchs:
                             bandwidth_trace.reset_for_episode(env_batch["seq_name"])
                         batch_state = EvalBatchState(
@@ -112,6 +116,7 @@ def eval(
                             ignore_tiny_diff=True,
                         )
                         episode_clock = FastEvalClock(fast_eval, args.fast_eval_speedup)
+                        bw_t0_ms = float(episode_clock.now_ms)
                         completed_decisions = 0
                         executed_control_steps = 0
                         pbar.update(n=eval_env.batch_size)
@@ -168,7 +173,7 @@ def eval(
                             episode_clock.advance_blocking(obs_latency_ms)
 
                             payload_bytes, payload_bits, payload_mb = estimate_uplink_payload_bits_from_outputs(outputs)
-                            bandwidth_bps = bandwidth_trace.next_bandwidth_bps()
+                            bandwidth_bps = bandwidth_trace.bandwidth_at_ms(float(episode_clock.now_ms) - bw_t0_ms)
                             uplink_latency_ms = calculate_latency_ms(payload_bits, bandwidth_bps) if enable_comm_delay else 0.0
                             loop_without_comm_ms = float((time.perf_counter() - step_start) * 1000.0)
                             if uplink_latency_ms > 0 and not fast_eval:

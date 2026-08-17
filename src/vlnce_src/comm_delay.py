@@ -49,6 +49,15 @@ class BandwidthTrace:
     def reset(self, index=0):
         self._index = int(index) % self.sample_count
 
+    def bandwidth_at_ms(self, elapsed_ms: float) -> float:
+        """Time-anchored sample: offset from the current _index (episode hash
+        start set by reset_for_episode) by logical elapsed ms, 1 sample per
+        second, cycled over the trace. Purely a function of elapsed time --
+        decoupled from request count so all paradigms see the same bandwidth
+        at the same logical time in the same episode."""
+        idx = (self._index + int(max(0.0, elapsed_ms) // 1000.0)) % self.sample_count
+        return self.samples_bps[idx]
+
     def reset_for_episode(self, seq_name):
         digest = hashlib.sha256(str(seq_name).encode("utf-8")).hexdigest()
         self.reset(int(digest[:8], 16))
