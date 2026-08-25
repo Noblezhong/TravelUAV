@@ -1595,7 +1595,7 @@ if __name__ == "__main__":
     bandwidth_trace = BandwidthTrace(trace_path, cycle=True)
     logger.info(
         f"Loaded bandwidth trace: {trace_path} ({bandwidth_trace.sample_count} samples), "
-        f"enable_comm_delay={enable_comm_delay}, scheduler=rule"
+        f"enable_comm_delay={enable_comm_delay}, scheduler=random"
     )
 
     setup()
