@@ -1577,7 +1577,7 @@ def eval(
 
 if __name__ == "__main__":
     _set_console_log_message_only()
-    configure_fast_eval_output(args, "rule_based")
+    configure_fast_eval_output(args, "random")
     eval_save_path = args.eval_save_path
     eval_json_path = args.eval_json_path
     dataset_path = args.dataset_path
@@ -1616,8 +1616,8 @@ if __name__ == "__main__":
 
     print("Assist setting: always_help --", args.always_help, "    use_gt --", args.use_gt)
 
-    profile_log_path = os.path.join(profile_log_dir, f"rule_based_{args.make_dir_time}.jsonl")
-    summary_path = os.path.join(profile_log_dir, f"rule_based_{args.make_dir_time}_summary.json")
+    profile_log_path = os.path.join(profile_log_dir, f"random_{args.make_dir_time}.jsonl")
+    summary_path = os.path.join(profile_log_dir, f"random_{args.make_dir_time}_summary.json")
 
     eval(
         model_wrapper=model_wrapper,
