@@ -102,6 +102,8 @@ class MyThread(threading.Thread):
 
 
 class AirVLNSimulatorClientTool:
+    AERODPO_ACTION_TIMEOUT_S = 15.0
+
     def __init__(self, machines_info, fast_eval=False, fast_eval_speedup=5.0) -> None:
         self.machines_info = copy.deepcopy(machines_info)
         self.fast_eval = bool(fast_eval)
@@ -967,3 +969,141 @@ class AirVLNSimulatorClientTool:
             logger.error('getSensorInfo failed.')
             return None
         return results 
+    def move_path_by_aerodpo_actions(self, actions_list, start_states):
+        """Execute one native AeroDPO fwd/down/yaw command per scene."""
+        from scipy.spatial.transform import Rotation
+
+        def move_path(airsim_client: airsim.VehicleClient, action_dict, start_state):
+            state_sensor = State(airsim_client)
+            imu_sensor = Imu(airsim_client, imu_name="Imu")
+            airsim_client.enableApiControl(True)
+            airsim_client.armDisarm(True)
+            airsim_client.simPause(False)
+
+            action_wall_start = time.perf_counter()
+            start_info = copy.deepcopy(state_sensor.retrieve())
+            action_sim_start = int(start_info["timestamp"])
+
+            pred_fwd = float(action_dict["fwd"])
+            pred_down = float(action_dict["down"])
+            pred_yaw = float(action_dict["yaw"])
+            current_position = start_state.position
+            raw_orientation = start_state.orientation
+            if isinstance(raw_orientation, dict):
+                quaternion = [
+                    raw_orientation.get("x", 0.0),
+                    raw_orientation.get("y", 0.0),
+                    raw_orientation.get("z", 0.0),
+                    raw_orientation.get("w", 1.0),
+                ]
+            else:
+                quaternion = [
+                    raw_orientation.x_val,
+                    raw_orientation.y_val,
+                    raw_orientation.z_val,
+                    raw_orientation.w_val,
+                ]
+
+            current_yaw = Rotation.from_quat(quaternion).as_euler("zyx")[0]
+            target_yaw = current_yaw + pred_yaw
+            target_yaw_deg = float(np.degrees(target_yaw))
+            dx = pred_fwd * np.cos(target_yaw)
+            dy = pred_fwd * np.sin(target_yaw)
+            dz = pred_down
+            horizontal_distance = float(np.hypot(dx, dy))
+            vertical_distance = abs(dz)
+            total_distance = float(np.sqrt(horizontal_distance**2 + vertical_distance**2))
+
+            epsilon = 0.01
+            if (
+                horizontal_distance > epsilon
+                or vertical_distance > epsilon
+                or abs(pred_yaw) > epsilon
+            ):
+                airsim_client.rotateToYawAsync(
+                    target_yaw_deg, timeout_sec=3, margin=5
+                ).join()
+                if abs(pred_yaw) < 0.25 and total_distance > epsilon:
+                    if total_distance < 1.0:
+                        duration = 1.0
+                        vx, vy, vz = dx, dy, dz
+                    else:
+                        duration = total_distance
+                        vx, vy, vz = dx / total_distance, dy / total_distance, dz / total_distance
+                    airsim_client.moveByVelocityAsync(
+                        float(vx),
+                        float(vy),
+                        float(vz),
+                        duration=float(duration),
+                        drivetrain=airsim.DrivetrainType.MaxDegreeOfFreedom,
+                        yaw_mode=airsim.YawMode(
+                            is_rate=False, yaw_or_rate=target_yaw_deg
+                        ),
+                    ).join()
+                elif abs(pred_yaw) >= 0.25:
+                    target_z = float(current_position.z_val + dz)
+                    airsim_client.moveToZAsync(
+                        target_z, velocity=2.0, timeout_sec=3
+                    ).join()
+
+            airsim_client.moveByVelocityAsync(0, 0, 0, duration=0.5).join()
+            state_info = copy.deepcopy(state_sensor.retrieve())
+            imu_info = copy.deepcopy(imu_sensor.retrieve())
+            airsim_client.simPause(True)
+
+            collision = bool(state_info.get("collision", {}).get("has_collided", False))
+            action_wall_ms = (time.perf_counter() - action_wall_start) * 1000.0
+            action_sim_ms = max(
+                0.0, (int(state_info["timestamp"]) - action_sim_start) / 1e6
+            )
+            observation = {"sensors": {"state": state_info, "imu": imu_info}}
+            return {
+                "states": [copy.deepcopy(observation) for _ in range(5)],
+                "collision": collision,
+                "wall_time_ms": action_wall_ms,
+                "sim_time_ms": action_sim_ms,
+            }
+
+        threads = []
+        for machine_index, machine_clients in enumerate(self.airsim_clients):
+            threads.append([])
+            for scene_index, airsim_client in enumerate(machine_clients):
+                thread = MyThread(
+                    move_path,
+                    (
+                        airsim_client,
+                        actions_list[machine_index][scene_index],
+                        start_states[machine_index][scene_index],
+                    ),
+                )
+                thread.setDaemon(True)
+                threads[-1].append(thread)
+
+        for machine_threads in threads:
+            for thread in machine_threads:
+                thread.start()
+        deadline = time.monotonic() + float(
+            getattr(self, "AERODPO_ACTION_TIMEOUT_S", 15.0)
+        )
+        for machine_threads in threads:
+            for thread in machine_threads:
+                thread.join(timeout=max(0.0, deadline - time.monotonic()))
+
+        results = []
+        failed = False
+        for machine_threads in threads:
+            machine_results = []
+            for thread in machine_threads:
+                if thread.is_alive():
+                    failed = True
+                    machine_results.append(None)
+                    continue
+                result = thread.get_result()
+                if result is None or not thread.flag_ok:
+                    failed = True
+                machine_results.append(result)
+            results.append(machine_results)
+        if failed:
+            logger.error("move path by AeroDPO actions failed.")
+            return None
+        return results

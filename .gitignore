@@ -79,3 +79,6 @@ closeloop_envs
 evaluations/
 training/
 models/
+
+# AeroDPO formal-evaluation artifacts (may be tens of GB)
+eval_aerodpo_stopgo*/

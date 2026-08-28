@@ -111,6 +111,10 @@ class CommonArguments:
         default=100,
         metadata={"help": "max episodes per scene before forced UE4 restart"},
     )
+    allow_nonstandard_eval_count: bool = field(
+        default=False,
+        metadata={"help": "allow smoke-test splits that do not contain 1,418 episodes"},
+    )
     
 @dataclass
 class DataArguments:
@@ -127,6 +131,7 @@ class DataArguments:
 @dataclass
 class ModelArguments:
     model_path: Optional[str] = field(default="facebook/opt-350m")
+    base_model_path: Optional[str] = field(default=None)
     model_base: Optional[str] = field(default=None)
     traj_model_path: Optional[str] = field(default=None)
     vision_tower: Optional[str] = field(default=None)

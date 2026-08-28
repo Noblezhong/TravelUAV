@@ -111,6 +111,7 @@ class AirVLNENV:
         self.one_scene_could_use_num = float(args.max_episodes_per_scene)
         self.this_scene_used_cnt = 0
         self.last_action_timings = []
+        self.aerodpo_eval_mode = False
         self.init_VectorEnvUtil()
 
     def load_my_datasets(self):
@@ -231,7 +232,6 @@ class AirVLNENV:
         self._changeEnv(need_change=False)
 
         self._setTrajectorys()
-        
         self._setObjects()
 
         self.update_measurements()
@@ -394,12 +394,22 @@ class AirVLNENV:
 
     def _getStates(self):
         # CMA eval only needs front camera — 5x faster image capture
-        _cma_cameras = ['FrontCamera'] if os.environ.get('CMA_EVAL_ONLY') == '1' else \
-                       ['FrontCamera', 'LeftCamera', 'RightCamera', 'RearCamera', 'DownCamera']
+        if getattr(self, "aerodpo_eval_mode", False):
+            _cma_cameras = ["FrontCamera", "DownCamera"]
+        elif os.environ.get('CMA_EVAL_ONLY') == '1':
+            _cma_cameras = ['FrontCamera']
+        else:
+            _cma_cameras = ['FrontCamera', 'LeftCamera', 'RightCamera', 'RearCamera', 'DownCamera']
         _record_cameras = ['FrontCameraRecord'] if os.environ.get('CMA_EVAL_ONLY') == '1' else \
                           ['FrontCameraRecord', 'DownCameraRecord']
         responses = self._fetch_images(self.simulator_tool.getImageResponses, _cma_cameras, 'getImageResponses')
-        responses_for_record = self._fetch_images(self.simulator_tool.getImageResponsesForRecord, _record_cameras, 'getImageResponsesForRecord')
+        responses_for_record = None
+        if not getattr(self, "aerodpo_eval_mode", False):
+            responses_for_record = self._fetch_images(
+                self.simulator_tool.getImageResponsesForRecord,
+                _record_cameras,
+                "getImageResponsesForRecord",
+            )
 
         if responses is not None:
             cnt = 0
@@ -412,7 +422,12 @@ class AirVLNENV:
         cnt = 0
         for index_1, item in enumerate(self.machines_info):
             for index_2 in range(len(item['open_scenes'])):
-                if responses is not None and responses_for_record is not None:
+                if responses is not None and getattr(self, "aerodpo_eval_mode", False):
+                    rgb_images = responses[index_1][index_2][0]
+                    depth_images = responses[index_1][index_2][1]
+                    rgb_records = []
+                    depth_records = []
+                elif responses is not None and responses_for_record is not None:
                     rgb_images = responses[index_1][index_2][0]
                     depth_images = responses[index_1][index_2][1]
                     rgb_records = responses_for_record[index_1][index_2][0]
@@ -589,3 +604,49 @@ class AirVLNENV:
                     f"target: {target_position[0]}, {target_position[1]}, {target_position[2]}"
                 )
      
+    def makeAeroDPOActions(self, actions_list):
+        """Apply one native AeroDPO action for every active scene."""
+        actions_args = []
+        action_index = 0
+        for machine in self.machines_info:
+            machine_actions = []
+            for _ in machine["open_scenes"]:
+                machine_actions.append(actions_list[action_index])
+                action_index += 1
+            actions_args.append(machine_actions)
+
+        start_states = self._get_current_state()
+        results = self.simulator_tool.move_path_by_aerodpo_actions(
+            actions_list=actions_args,
+            start_states=start_states,
+        )
+        if results is None:
+            raise RuntimeError("move by AeroDPO actions failed")
+
+        batch_results = []
+        batch_collisions = []
+        self.last_action_timings = []
+        for machine_results in results:
+            for result in machine_results:
+                batch_results.append(result["states"])
+                batch_collisions.append(bool(result["collision"]))
+                self.last_action_timings.append({
+                    "wall_time_ms": float(result.get("wall_time_ms", 0.0)),
+                    "sim_time_ms": float(result.get("sim_time_ms", 0.0)),
+                })
+
+        for index, action in enumerate(actions_list):
+            states = batch_results[index]
+            if states:
+                final_position = states[-1]["sensors"]["state"]["position"]
+                if np.linalg.norm(
+                    np.asarray(final_position) - np.asarray(self.batch[index]["object_position"])
+                ) < self.sim_states[index].SUCCESS_DISTANCE:
+                    self.sim_states[index].oracle_success = True
+                self.sim_states[index].trajectory.extend(states)
+            self.sim_states[index].step += 1
+            self.sim_states[index].pre_waypoints = [copy.deepcopy(action)]
+            self.sim_states[index].is_collisioned = batch_collisions[index]
+
+        self.update_measurements()
+        return batch_results

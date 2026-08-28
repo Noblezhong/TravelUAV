@@ -460,7 +460,7 @@ def build_result(
     if invalid:
         warnings.append(f"{len(invalid)} invalid JSON lines: {invalid[:10]}")
     missing_shifts = [e["episode_id"] for e in episodes if e["time_shift_s"] is None]
-    if missing_shifts:
+    if missing_shifts and method != "stopgo":
         warnings.append(f"{len(missing_shifts)} episodes without shift samples")
     unscanned = [e["episode_id"] for e in episodes if e["episode_id"] not in airsim]
     if unscanned:
