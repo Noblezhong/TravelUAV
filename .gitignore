@@ -85,6 +85,7 @@ models/
 eval_aerodpo_stopgo*/
 eval_aerodpo_llamacpp*/
 eval_*_ncn*/
+eval_continuous_tcm*/
 profile_logs/
 native/aerodpo_llamacpp_local/build/
 AeroDPO-llamacpp*/
