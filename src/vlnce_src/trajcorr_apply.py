@@ -106,17 +106,19 @@ class TcmEpisodeStats:
 
 
 def derive_trajcorr_inputs(result) -> Tuple[Optional[Tuple[List[float], List[float]]], Optional[str]]:
-    """Derive (coarse_goal_world, coarse_local) from the LLM output.
+    """Return the planner's request-frame coarse vector and world goal.
 
-    coarse_goal_world := llm_output[-1] (final world-frame goal estimate)
-    coarse_local      := coarse_goal_world - observation_pose (l_m = its norm)
+    The VLM output is target-aligned local data, not a world-coordinate goal.
+    The planner restores these fields with the original TC-ON rotation chain.
     """
-    llm_output = getattr(result, "llm_output", None) or []
-    if len(llm_output) == 0:
-        return None, "empty_llm_output"
-    coarse_goal_world = np.asarray(llm_output[-1], dtype=np.float64).reshape(3)
-    observation_pose = np.asarray(result.observation_pose, dtype=np.float64).reshape(3)
-    coarse_local = coarse_goal_world - observation_pose
+    coarse_goal_world = getattr(result, "coarse_goal_world", None)
+    coarse_local = getattr(result, "coarse_local", None)
+    if coarse_goal_world is None or coarse_local is None:
+        return None, "missing_coarse_frame"
+    coarse_goal_world = np.asarray(coarse_goal_world, dtype=np.float64).reshape(3)
+    coarse_local = np.asarray(coarse_local, dtype=np.float64).reshape(3)
+    if not np.all(np.isfinite(coarse_goal_world)) or not np.all(np.isfinite(coarse_local)):
+        return None, "nonfinite_coarse_frame"
     if float(np.linalg.norm(coarse_local)) <= 1e-6:
         return None, "zero_length_coarse"
     return (
@@ -231,6 +233,8 @@ class TcmRuntime:
             effective.ready_logical_ms = float(effective.ready_logical_ms) + regen_ms
         tcm_extra.update(
             {
+                "coarse_local": copy.deepcopy(coarse_local),
+                "coarse_goal_world": copy.deepcopy(coarse_goal_world),
                 "trajcorr_regen_ms": float(regen_ms),
                 "target_lock_active": bool(self.target_lock.active),
                 "target_lock_completion_reason": completion,

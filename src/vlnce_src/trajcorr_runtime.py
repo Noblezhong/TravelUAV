@@ -16,6 +16,29 @@ COMPLETION_GOAL_PASSED = "goal_passed"
 COMPLETION_BUFFER_EXHAUSTED = "buffer_exhausted"
 
 
+def coarse_target_to_world_goal(episode, coarse_target, rot_to_target=None) -> List[float]:
+    """Convert an edge coarse target from its training frame to world frame.
+
+    The VLM target is expressed in the first observation's body frame and,
+    when present, additionally in the target-aligned frame returned by data
+    preparation.  This mirrors the original TC-ON edge evaluator.
+    """
+    latest = episode[-1]
+    position = np.asarray(
+        latest["sensors"]["state"]["position"][0:3], dtype=np.float64
+    )
+    initial_rotation = np.asarray(
+        episode[0]["sensors"]["imu"]["rotation"], dtype=np.float64
+    ).reshape(3, 3)
+    coarse = np.asarray(coarse_target, dtype=np.float64).reshape(3)
+    if rot_to_target is None:
+        world_delta = initial_rotation @ coarse
+    else:
+        target_rotation = np.asarray(rot_to_target, dtype=np.float64).reshape(3, 3)
+        world_delta = initial_rotation @ target_rotation @ coarse
+    return (position + world_delta).tolist()
+
+
 @dataclass(frozen=True)
 class TrajectoryDecision:
     mode: str

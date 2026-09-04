@@ -81,6 +81,8 @@ class PlannerResult:
     uplink_payload_mb: float
     uplink_bandwidth_mbps: float
     uplink_latency_ms: float
+    coarse_local: List[float]
+    coarse_goal_world: List[float]
     llm_output: List[List[float]]
     refined_waypoints: List[List[float]]
     submitted_logical_ms: Optional[float] = None
@@ -681,6 +683,8 @@ class LatestOnlyEdgePlanner:
             uplink_payload_mb=float(payload_mb),
             uplink_bandwidth_mbps=float(bandwidth_bps / 1_000_000.0),
             uplink_latency_ms=float(uplink_latency_ms),
+            coarse_local=copy.deepcopy(profile_info["coarse_local"][0]),
+            coarse_goal_world=copy.deepcopy(profile_info["coarse_goal_world"][0]),
             llm_output=copy.deepcopy(profile_info["llm_output"]),
             refined_waypoints=np.asarray(refined_waypoints[0]).tolist(),
             submitted_logical_ms=snapshot.submitted_logical_ms,

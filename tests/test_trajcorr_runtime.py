@@ -1,5 +1,8 @@
 import unittest
+from types import SimpleNamespace
 
+import numpy as np
+from src.vlnce_src.trajcorr_apply import derive_trajcorr_inputs
 from src.vlnce_src.trajcorr_runtime import (
     COMPLETION_BUFFER_EXHAUSTED,
     COMPLETION_GOAL_PASSED,
@@ -11,6 +14,7 @@ from src.vlnce_src.trajcorr_runtime import (
     TRAJECTORY_CORRECTED,
     TRAJECTORY_ORIGINAL,
     TargetLockLifecycle,
+    coarse_target_to_world_goal,
     filter_target_lock_waypoints,
     select_trajectory_mode,
 )
@@ -43,6 +47,32 @@ class TrajectoryDecisionTest(unittest.TestCase):
             correction_threshold_m=2.5,
         )
         self.assertEqual(decision.mode, TRAJECTORY_ORIGINAL)
+
+
+class CoarseFrameTest(unittest.TestCase):
+    def test_converts_target_aligned_vector_to_world_goal(self):
+        rotation_90_z = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+        episode = [
+            {"sensors": {"imu": {"rotation": np.eye(3).tolist()}, "state": {"position": [0.0, 0.0, 0.0]}}},
+            {"sensors": {"imu": {"rotation": np.eye(3).tolist()}, "state": {"position": [10.0, 20.0, 30.0]}}},
+        ]
+        goal = coarse_target_to_world_goal(episode, [2.0, 0.0, 0.0], rotation_90_z)
+        self.assertEqual(goal, [10.0, 22.0, 30.0])
+
+    def test_uses_explicit_request_frame_not_llm_coordinates(self):
+        result = SimpleNamespace(
+            coarse_local=[0.0, 0.0, -5.0],
+            coarse_goal_world=[100.0, 200.0, -15.0],
+            llm_output=[[999.0, 999.0, 999.0]],
+        )
+        inputs, reason = derive_trajcorr_inputs(result)
+        self.assertIsNone(reason)
+        self.assertEqual(inputs, ([100.0, 200.0, -15.0], [0.0, 0.0, -5.0]))
+
+    def test_missing_request_frame_falls_back_safely(self):
+        inputs, reason = derive_trajcorr_inputs(SimpleNamespace(llm_output=[[1.0, 2.0, 3.0]]))
+        self.assertIsNone(inputs)
+        self.assertEqual(reason, "missing_coarse_frame")
 
 
 class ContinuousRequestCounterTest(unittest.TestCase):
