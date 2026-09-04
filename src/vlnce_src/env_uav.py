@@ -381,6 +381,38 @@ class AirVLNENV:
         self.sim_states = states
         return obs
 
+    def get_aerodpo_rgb_observations(self):
+        """Fetch NCN's two RGB views without changing the normal VLN observer.
+
+        The returned state is a snapshot of the already-maintained simulator
+        state.  This method deliberately does not call ``get_obs`` or mutate
+        ``sim_states``: the concurrent edge planner must retain its original
+        five-view observation and upload accounting.
+        """
+        responses = self._fetch_images(
+            self.simulator_tool.getImageResponses,
+            ["FrontCamera", "DownCamera"],
+            "getAeroDPORgbObservations",
+        )
+        if responses is None:
+            raise RuntimeError("NCN AeroDPO image fetch failed")
+        observations = []
+        index = 0
+        for machine_responses in responses:
+            for response in machine_responses:
+                rgb_images = response[0]
+                if len(rgb_images) != 2:
+                    raise RuntimeError("NCN requires FrontCamera and DownCamera")
+                observations.append({
+                    "front_bgr": rgb_images[0],
+                    "down_bgr": rgb_images[1],
+                    "state": copy.deepcopy(self.sim_states[index].state),
+                })
+                index += 1
+        if len(observations) != self.batch_size:
+            raise RuntimeError("NCN image batch size mismatch")
+        return observations
+
     def _fetch_images(self, fetch_func, cameras, role):
         """Fetch images with one retry. A sporadic AirSim wedge (per-request RPC
         timeout, retried x4 inside the tool) makes the tool return None — never

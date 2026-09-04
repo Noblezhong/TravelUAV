@@ -42,6 +42,7 @@ HYBRID_SCHEDULER_MDP_MODELING.docx
 *.ckpt
 *.bin
 *.safetensors
+*.gguf
 Model/LLaMA-UAV/work_dirs/
 Model/LLaMA-UAV/model_zoo/
 work_dirs/
@@ -82,3 +83,9 @@ models/
 
 # AeroDPO formal-evaluation artifacts (may be tens of GB)
 eval_aerodpo_stopgo*/
+eval_aerodpo_llamacpp*/
+eval_*_ncn*/
+profile_logs/
+native/aerodpo_llamacpp_local/build/
+AeroDPO-llamacpp*/
+aerodpo_llamacpp_mmproj_staging*/

@@ -67,6 +67,10 @@ class CommonArguments:
     scheduler_illegal_action_penalty: float = field(default=5.0, metadata={"help": "penalty for choosing an illegal action in the current state"})
     scheduler_idle_wait_ms: float = field(default=100.0, metadata={"help": "small hover duration for STOP_NO_REQUEST when no request is in flight"})
     scheduler_ent_coef: float = field(default=0.01, metadata={"help": "PPO entropy coefficient for exploration"})
+    enable_ncn: bool = field(default=False, metadata={"help": "enable local AeroDPO NCN fallback"})
+    ncn_response_ema_alpha: float = field(default=0.5, metadata={"help": "EMA alpha for predicted edge compute time"})
+    ncn_response_safety_margin_ms: float = field(default=0.0, metadata={"help": "extra logical-time margin before NCN takeover"})
+    ncn_max_consecutive_actions: int = field(default=200, metadata={"help": "safety cap for consecutive NCN actions while edge guidance is pending"})
 
     dagger_it: int = field(default=1)
     epochs: int = field(default=10)
@@ -138,6 +142,11 @@ class ModelArguments:
     image_processor: Optional[str] = field(default=None)
     groundingdino_config: Optional[str] = field(default=None)
     groundingdino_model_path: Optional[str] = field(default=None)
+    ncn_text_model_path: Optional[str] = field(default=None, metadata={"help": "NCN llama.cpp text GGUF, normally Q8_0"})
+    ncn_lora_model_path: Optional[str] = field(default=None, metadata={"help": "NCN AeroDPO language LoRA GGUF"})
+    ncn_mmproj_path: Optional[str] = field(default=None, metadata={"help": "NCN BF16 multimodal projector GGUF"})
+    ncn_local_bridge_path: Optional[str] = field(default=None, metadata={"help": "NCN local llama.cpp bridge shared library"})
+    ncn_local_context: int = field(default=2048, metadata={"help": "NCN llama.cpp context length"})
     
     
 parser = transformers.HfArgumentParser((CommonArguments, ModelArguments, DataArguments))

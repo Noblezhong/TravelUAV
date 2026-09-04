@@ -16,6 +16,7 @@
 - [Dependencies](#dependencies)
 - [Preparation](#prepare-the-data)
 - [Usage](#usage)
+- [NCN / Q8 AeroDPO](#ncn--q8-aerodpo)
 - [Citation](#paper)
 
 ## News
@@ -113,6 +114,16 @@ bash scripts/dagger_NYC.sh
 bash scripts/eval.sh
 bash scripts/metrics.sh
 ```
+
+## NCN / Q8 AeroDPO
+
+The `edge-collab-vln` branch includes the local Q8 AeroDPO NCN fallback used
+by `Continuous-only + NCN` and `Stop-go + NCN`.  Model weights and generated
+GGUF files are intentionally not tracked.  Before running either evaluator on
+a new machine, follow [the 5090 deployment guide](docs/NCN_5090_DEPLOYMENT.md)
+to compile the pinned llama.cpp version, generate the local Q8 artifacts from
+the original Qwen base plus AeroDPO adapter, build the bridge, and run smoke
+validation.
 
 # Paper
 
