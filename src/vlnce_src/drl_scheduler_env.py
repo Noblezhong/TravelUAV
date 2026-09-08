@@ -74,6 +74,7 @@ class FixedBandwidthEdgePlanner:
         self.clock = clock or FastEvalClock(False)
         self.fast_eval = bool(self.clock.enabled)
         self._pending_job: Optional[DRLPlannerJob] = None
+        self._active_job: Optional[DRLPlannerJob] = None
         self._running = False
         self._closed = False
         self._cond = threading.Condition()
@@ -100,6 +101,46 @@ class FixedBandwidthEdgePlanner:
                 or self._held_result is not None
                 or not self._results.empty()
             )
+
+    def pending_request_ids(self) -> List[int]:
+        """Return request ids which can still produce an edge result.
+
+        This is inspection-only metadata for MATCH's NCN recovery state
+        machine; it does not alter the legacy scheduler queue behaviour.
+        """
+        with self._cond:
+            jobs = (self._active_job, self._pending_job)
+            return [int(job.snapshot.request_id) for job in jobs if job is not None]
+
+    def predicted_remaining_ms(self, estimated_compute_ms: float) -> Optional[float]:
+        """Estimate logical time until the next active edge result.
+
+        The upload part is exact for the captured request and sampled
+        bandwidth; the compute part is supplied by MATCH's per-episode EMA.
+        """
+        with self._cond:
+            job = self._active_job or self._pending_job
+            if job is None:
+                return 0.0 if self._held_result is not None or not self._results.empty() else None
+            start_ms = job.snapshot.planner_started_logical_ms
+            if start_ms is None:
+                start_ms = job.snapshot.submitted_logical_ms
+            if start_ms is None:
+                return None
+            _, payload_bits, _ = estimate_uplink_payload_bits_from_episodes([job.snapshot.episode])
+            uplink_ms = calculate_latency_ms(payload_bits, job.bandwidth_bps) if self.enable_comm_delay else 0.0
+            ready_ms = float(start_ms) + float(uplink_ms) + max(0.0, float(estimated_compute_ms))
+            return max(0.0, ready_ms - float(self.clock.now_ms))
+
+    def request_age_ms(self) -> Optional[float]:
+        with self._cond:
+            job = self._active_job or self._pending_job
+            if job is None:
+                return None
+            start_ms = job.snapshot.planner_started_logical_ms
+            if start_ms is None:
+                start_ms = job.snapshot.submitted_logical_ms
+            return None if start_ms is None else max(0.0, float(self.clock.now_ms) - float(start_ms))
 
     def poll_result(self) -> Optional[PlannerResult]:
         with self._cond:
@@ -156,6 +197,7 @@ class FixedBandwidthEdgePlanner:
                 job = self._pending_job
                 self._pending_job = None
                 self._running = True
+                self._active_job = job
             try:
                 assert job is not None
                 self._results.put(self._run_job(job))
@@ -170,6 +212,7 @@ class FixedBandwidthEdgePlanner:
             finally:
                 with self._cond:
                     self._running = False
+                    self._active_job = None
                     self._cond.notify_all()
 
     def _failed_result(self, job) -> PlannerResult:

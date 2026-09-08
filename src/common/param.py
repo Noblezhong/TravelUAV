@@ -76,6 +76,8 @@ class CommonArguments:
     scheduler_req_buf_weight: float = field(default=0.0, metadata={"help": "pilot8: continuous req buffer weight; buf_term = w*(buffer-buf_ref), subtracted from req"})
     scheduler_req_inflight_penalty: float = field(default=0.0, metadata={"help": "pilot8: penalty for requesting while a request is already inflight"})
     scheduler_motion_stop_noreq_penalty: float = field(default=0.0, metadata={"help": "pilot10: constant penalty for STOP_NO_REQUEST with no inflight (dry hover / reward-hacking); STOP+REQUEST and STOP+inflight keep their own terms"})
+    ncn_edge_timeout_ms: float = field(default=0.0, metadata={"help": "optional logical edge timeout for NCN takeover; 0 disables it"})
+    ncn_outage_duration_ms: float = field(default=0.0, metadata={"help": "optional outage immediately after cold start; 0 disables it"})
 
     dagger_it: int = field(default=1)
     epochs: int = field(default=10)
