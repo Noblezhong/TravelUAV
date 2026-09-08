@@ -123,8 +123,15 @@ class MatchEnv(DRLSchedulerEnv):
         prev_ne_m = self._current_ne_m()
         prev_state_drift_m = self._current_drift_m()
         prev_time_drift_ms = self._current_time_drift_ms()
+        # pre-action decision state for the pilot7 shaping rules (what the
+        # agent decided on, NOT the post-execution state).
+        pre_buffer_remaining = self._buffer_remaining()
+        pre_has_inflight = self.planner.has_inflight()
 
         motion_stop, request_edge = self._decode_action(action_id)
+        # original decoded intent, captured BEFORE the legality override so
+        # the shaping can judge the action the agent actually chose.
+        orig_motion_stop, orig_request_edge = motion_stop, request_edge
 
         # ── hard legality guard ──────────────────────────────────────
         legal, illegal_reason = self._check_action_legal(action_id)
@@ -198,24 +205,20 @@ class MatchEnv(DRLSchedulerEnv):
             if self.clock.enabled
             else float((time.perf_counter() - step_start) * 1000.0)
         )
-        # CONTINUE_REQUEST runs DINO while flying; the DINO time should not
-        # inflate the time penalty because the drone isn't idling.
-        dino_overhead_ms = 0.0
-        if not motion_stop:
-            dino_overhead_ms += float(extra.get("request_obs_latency_ms", 0) or 0)
-            dino_overhead_ms += float(extra.get("request_dino_latency_ms", 0) or 0)
-        effective_time_drift_ms = max(0.0, time_drift_delta_ms - dino_overhead_ms)
         reward, reward_parts = self._compute_reward(
             elapsed_ms=elapsed_ms,
-            dino_overhead_ms=dino_overhead_ms,
-            ne_progress_m=ne_progress_m,
-            state_drift_delta_m=state_drift_delta_m,
-            time_drift_delta_ms=effective_time_drift_ms,
-            request_edge=request_bw is not None,
             terminated=terminated,
             terminal_reason=terminal_reason,
             action_illegal=action_illegal,
             oracle_success=bool(self.state.oracle_success),
+            # pre-action decision state + original intent for the shaping rules
+            time_drift_ms=prev_time_drift_ms,
+            state_drift_m=prev_state_drift_m,
+            buffer_remaining=pre_buffer_remaining,
+            observed_bw=observed_bw,
+            has_inflight=pre_has_inflight,
+            orig_request_edge=orig_request_edge,
+            orig_motion_stop=orig_motion_stop,
         )
         obs = self._build_observation(observed_bw)
         extra.update(self._tcm_step_extras)
