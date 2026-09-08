@@ -60,7 +60,6 @@ def main():
         max_waypoints=args.maxWaypoints,
     )
     from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
-    from src.vlnce_src.drl_ac_policy import SplitACPolicy
 
     class StopOnEpisodeCount(BaseCallback):
         """Stop training after a target number of episodes, plus a safety timestep cap."""
@@ -87,7 +86,7 @@ def main():
 
     monitored_env = Monitor(gym_env, filename=os.path.join(profile_dir, f"drl_train_monitor_{args.make_dir_time}.csv"))
     scheduler = PPO(
-        SplitACPolicy,
+        "MlpPolicy",  # pilot7: unified Actor-Critic (SplitACPolicy was a no-op split)
         monitored_env,
         learning_rate=float(args.scheduler_learning_rate),
         n_steps=int(args.scheduler_n_steps),
@@ -125,7 +124,8 @@ def main():
         verbose=1,
     )
     scheduler.learn(
-        total_timesteps=int(args.scheduler_total_timesteps) - resume_steps,
+        total_timesteps=int(args.scheduler_total_timesteps),
+        reset_num_timesteps=False,
         tb_log_name="ppo_scheduler",
         callback=[checkpoint_callback, episode_callback],
     )

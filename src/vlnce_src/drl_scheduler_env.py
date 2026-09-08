@@ -294,7 +294,7 @@ class DRLSchedulerEnv(gym.Env):
         self.max_waypoints = int(max_waypoints or args.max_control_steps)
         self.deterministic_eval = bool(deterministic_eval)
         self.action_space = spaces.Discrete(4)
-        self.observation_space = spaces.Box(low=-10.0, high=10.0, shape=(8,), dtype=np.float32)
+        self.observation_space = spaces.Box(low=-10.0, high=10.0, shape=(5,), dtype=np.float32)
 
         os.makedirs(os.path.dirname(self.profile_log_path), exist_ok=True)
         self.profile_fp = open(self.profile_log_path, "w", encoding="utf-8")
@@ -403,8 +403,15 @@ class DRLSchedulerEnv(gym.Env):
         prev_ne_m = self._current_ne_m()
         prev_state_drift_m = self._current_drift_m()
         prev_time_drift_ms = self._current_time_drift_ms()
+        # pre-action decision state for the pilot7 shaping rules (what the
+        # agent decided on, NOT the post-execution state).
+        pre_buffer_remaining = self._buffer_remaining()
+        pre_has_inflight = self.planner.has_inflight()
 
         motion_stop, request_edge = self._decode_action(action_id)
+        # original decoded intent, captured BEFORE the legality override so
+        # the shaping can judge the action the agent actually chose.
+        orig_motion_stop, orig_request_edge = motion_stop, request_edge
 
         # ── hard legality guard ──────────────────────────────────────
         legal, illegal_reason = self._check_action_legal(action_id)
@@ -412,9 +419,15 @@ class DRLSchedulerEnv(gym.Env):
         extra["action_illegal"] = action_illegal
         extra["action_illegal_reason"] = illegal_reason
         if action_illegal:
-            # override to the safe fallback: STOP_REQUEST
-            motion_stop, request_edge = True, True
-            extra["action_override"] = "STOP_REQUEST"
+            # pilot9 fallback: if a request is already in flight, waiting
+            # in place is the only sensible override (a repeat request would
+            # overwrite the in-flight job).  Otherwise request as before.
+            if self.planner.has_inflight():
+                motion_stop, request_edge = True, False
+                extra["action_override"] = "STOP_NO_REQUEST"
+            else:
+                motion_stop, request_edge = True, True
+                extra["action_override"] = "STOP_REQUEST"
         # ─────────────────────────────────────────────────────────────
 
         if motion_stop:
@@ -422,18 +435,33 @@ class DRLSchedulerEnv(gym.Env):
                 request_bw = observed_bw
                 self._stop_and_request(observed_bw, extra)
             else:
-                # STOP_NO_REQUEST: _check_action_legal guarantees inflight exists.
-                # (If inflight were absent the action would be illegal and
-                # overridden to STOP_REQUEST above.)
-                wait_start = time.perf_counter()
-                wait_logical_start = self.clock.now_ms
-                result = self.planner.wait_result()
-                extra["hover_wait_ms"] = float(
-                    self.clock.now_ms - wait_logical_start
-                    if self.clock.enabled
-                    else (time.perf_counter() - wait_start) * 1000.0
-                )
-                self._apply_result(result)
+                # STOP_NO_REQUEST: with inflight → wait for the in-flight
+                # result to land (original behavior).  Without inflight →
+                # hover in place one step: advance the logical clock so the
+                # bandwidth trace evolves, submit nothing, block nothing.
+                # This is the "low bandwidth → don't request, wait for it to
+                # recover" expression.  wait_result() on an empty queue would
+                # deadlock, so must branch on has_inflight().
+                if self.planner.has_inflight():
+                    wait_start = time.perf_counter()
+                    wait_logical_start = self.clock.now_ms
+                    result = self.planner.wait_result()
+                    extra["hover_wait_ms"] = float(
+                        self.clock.now_ms - wait_logical_start
+                        if self.clock.enabled
+                        else (time.perf_counter() - wait_start) * 1000.0
+                    )
+                    self._apply_result(result)
+                else:
+                    wait_start = time.perf_counter()
+                    wait_logical_start = self.clock.now_ms
+                    self.clock.advance_blocking(float(args.scheduler_idle_wait_ms))
+                    extra["hover_no_inflight"] = True
+                    extra["hover_wait_ms"] = float(
+                        self.clock.now_ms - wait_logical_start
+                        if self.clock.enabled
+                        else (time.perf_counter() - wait_start) * 1000.0
+                    )
         else:
             if self._buffer_remaining() <= 0:
                 request_bw = observed_bw
@@ -478,25 +506,20 @@ class DRLSchedulerEnv(gym.Env):
             if self.clock.enabled
             else float((time.perf_counter() - step_start) * 1000.0)
         )
-        # CONTINUE_REQUEST runs DINO while flying; the DINO time should not
-        # inflate the time penalty because the drone isn't idling.
-        dino_overhead_ms = 0.0
-        if not motion_stop:
-            dino_overhead_ms += float(extra.get("request_obs_latency_ms", 0) or 0)
-            dino_overhead_ms += float(extra.get("request_dino_latency_ms", 0) or 0)
-        effective_time_drift_ms = max(0.0, time_drift_delta_ms - dino_overhead_ms)
         reward, reward_parts = self._compute_reward(
             elapsed_ms=elapsed_ms,
-            dino_overhead_ms=dino_overhead_ms,
-            ne_progress_m=ne_progress_m,
-            state_drift_delta_m=state_drift_delta_m,
-            time_drift_delta_ms=effective_time_drift_ms,
-            request_edge=request_bw is not None,
-            request_stop=bool(motion_stop and request_bw is not None),
             terminated=terminated,
             terminal_reason=terminal_reason,
             action_illegal=action_illegal,
             oracle_success=bool(self.state.oracle_success),
+            # pre-action decision state + original intent for the shaping rules
+            time_drift_ms=prev_time_drift_ms,
+            state_drift_m=prev_state_drift_m,
+            buffer_remaining=pre_buffer_remaining,
+            observed_bw=observed_bw,
+            has_inflight=pre_has_inflight,
+            orig_request_edge=orig_request_edge,
+            orig_motion_stop=orig_motion_stop,
         )
         obs = self._build_observation(observed_bw)
         self._log_record(
@@ -570,12 +593,30 @@ class DRLSchedulerEnv(gym.Env):
         if not motion_stop and buffer_empty:
             # CONTINUE needs at least one buffered waypoint.
             return False, "continue_on_empty_buffer"
-        if motion_stop and not request_edge and not has_inflight:
-            # STOP_NO_REQUEST makes no sense when nothing is in flight.
-            return False, "stop_no_request_without_inflight"
+        if request_edge and has_inflight:
+            # pilot9: never issue a second request while one is in flight.
+            # LatestOnly submit() would overwrite (discard) the in-flight job,
+            # so a repeat request is physically meaningless — force wait-in-place.
+            return False, "request_with_inflight"
+        # pilot9: STOP_NO_REQUEST is now ALWAYS legal.  With no inflight it means
+        # "hover in place / wait for bandwidth to recover"; with inflight it
+        # means "wait for the in-flight request result to land".  The old
+        # stop_no_request_without_inflight restriction forced the agent to
+        # request whenever it wanted to hover, which drove the wrong-way
+        # bandwidth adaptivity (low bandwidth → forced requests).
         return True, None
 
     def _sample_bandwidth(self) -> float:
+        if bool(getattr(args, "scheduler_train_bw_iid", False)):
+            # todo#4: TRAINING-only i.i.d. bandwidth. Each step independently
+            # samples log-uniform(5,400) Mbps, breaking the time-anchored
+            # "low bandwidth ≈ stuck episode" coupling so the policy can learn
+            # the true bandwidth→request mapping. Eval never sets this flag,
+            # so evaluation still walks the real ucc4g trace.
+            lo_mbps, hi_mbps = 5.0, 400.0
+            bw_mbps = float(np.exp(np.random.uniform(np.log(lo_mbps), np.log(hi_mbps))))
+            self.last_observed_bandwidth_bps = bw_mbps * 1e6
+            return self.last_observed_bandwidth_bps
         # 按（逻辑）时间对齐采样：带宽 = trace[本集起点 + 已过逻辑秒]，而非按步数推进。
         # 悬停长等待期间时间照样流逝，策略看到的是真实时间轴上的网络演化。
         now_ms = (
@@ -682,8 +723,10 @@ class DRLSchedulerEnv(gym.Env):
             return
         self.planner.submit(snapshot, bandwidth_bps)
         self._last_request_step = self.scheduler_step_count
-        result = self._wait_for_request_result(snapshot.request_id, extra)
-        self._apply_result(result)
+        # pilot8: async STOP_REQUEST — submit and return without waiting.
+        # The result is applied cross-step by _poll_and_apply_result() in step(),
+        # so inflight persists across steps and STOP_NO_REQUEST (wait-in-place)
+        # becomes a legal, expressible action.
         extra["submitted_request_id"] = int(snapshot.request_id)
         extra["had_inflight_before_stop_request"] = bool(had_inflight)
         extra["hover_wait_ms"] = float(
@@ -749,37 +792,31 @@ class DRLSchedulerEnv(gym.Env):
     def _compute_reward(
         self,
         elapsed_ms: float,
-        ne_progress_m: float,
-        state_drift_delta_m: float,
-        time_drift_delta_ms: float,
-        request_edge: bool,
         terminated: bool,
         terminal_reason: Optional[str],
         action_illegal: bool = False,
         oracle_success: bool = False,
-        dino_overhead_ms: float = 0.0,
-        request_stop: bool = False,
+        # pilot7 pre-action decision state + original intent for shaping
+        time_drift_ms: float = 0.0,
+        state_drift_m: float = 0.0,
+        buffer_remaining: int = 0,
+        observed_bw: float = 0.0,
+        has_inflight: bool = False,
+        orig_request_edge: bool = False,
+        orig_motion_stop: bool = False,
     ) -> Tuple[float, Dict[str, float]]:
-        ne_progress_reward = float(args.scheduler_ne_progress_weight) * float(
-            np.clip(ne_progress_m / float(args.scheduler_ne_norm_m), -1.0, 1.0)
-        )
-        # DINO/obs time incurred by a REQUEST while the drone is flying
-        # (CONTINUE) should not count against the time penalty — the drone
-        # isn't hovering, so it's not "wasting" time.
-        effective_ms = max(0.0, elapsed_ms - dino_overhead_ms)
-        time_penalty = -float(args.scheduler_time_weight) * effective_ms / float(args.scheduler_time_norm_ms)
-        drift_penalty = -float(args.scheduler_drift_weight) * state_drift_delta_m / float(args.scheduler_drift_norm_m)
-        time_drift_penalty = -float(args.scheduler_time_drift_weight) * time_drift_delta_ms / float(args.scheduler_time_drift_norm_ms)
-        request_penalty = -float(args.scheduler_request_weight) if request_edge else 0.0
-        request_bw_penalty = 0.0
-        # Pilot-B: bandwidth penalty applies ONLY to STOP+REQUEST
-        # (hovering to upload wastes time); CONTINUE+REQUEST flies
-        # while uploading, so its request stays cheap -> policy should
-        # learn low-bandwidth preventive requests instead of none.
-        if request_edge and request_stop and float(getattr(args, "scheduler_request_bw_weight", 0.0)) > 0.0:
-            bw_mbps = float(self.last_observed_bandwidth_bps) / 1e6
-            bw_factor = float(np.clip(100.0 / max(bw_mbps, 1e-6), 0.25, 8.0))
-            request_bw_penalty = -float(args.scheduler_request_bw_weight) * bw_factor
+        """r_task + r_req + r_motion (pilot8 continuous shaping).
+
+        time / illegal / terminal (r_task) are unchanged from pilot7. Only the
+        two shaping terms are rewritten to continuous form:
+          motion:  w_motion · (drift − thr) · (stop ? +1 : −1)
+          req:     req · [ w_bw·(bw−bw_ref)/bw_ref − w_buf·(buffer−buf_ref) ]
+                   − w_inflight · req · inflight
+        All judged on the ORIGINAL intent (pre-legality override) and the
+        PRE-action decision state, same as pilot7.
+        """
+        # ── r_task (unchanged) ────────────────────────────────────────
+        time_penalty = -float(args.scheduler_time_weight) * elapsed_ms / float(args.scheduler_time_norm_ms)
         illegal_penalty = -float(args.scheduler_illegal_action_penalty) if action_illegal else 0.0
         terminal_reward = 0.0
         if terminated:
@@ -793,35 +830,63 @@ class DRLSchedulerEnv(gym.Env):
                 terminal_reward = float(args.scheduler_oracle_success_reward)
             elif terminal_reason in ("max_waypoints", "max_scheduler_steps", "done"):
                 terminal_reward = -float(args.scheduler_failure_penalty)
-        reward = ne_progress_reward + time_penalty + drift_penalty + time_drift_penalty + request_penalty + request_bw_penalty + illegal_penalty + terminal_reward
+
+        # ── r_req shaping (continuous bandwidth × buffer) ─────────────
+        req_shaping = 0.0
+        if orig_request_edge:
+            bw_ref_bps = float(args.scheduler_req_bw_thresh_mbps) * 1e6
+            buf_ref = float(args.scheduler_req_buf_thresh)
+            bw_term = float(args.scheduler_req_bw_weight) * (observed_bw - bw_ref_bps) / bw_ref_bps
+            buf_term = float(args.scheduler_req_buf_weight) * (buffer_remaining - buf_ref)
+            inflight_penalty = float(args.scheduler_req_inflight_penalty) if has_inflight else 0.0
+            req_shaping = bw_term - buf_term - inflight_penalty
+
+        # ── r_motion shaping (pilot10: stop-type discrimination) ─────
+        # pilot9 exposed a reward hack: STOP_NO_REQUEST with no inflight got
+        # the same +w·(drift−thresh) as STOP_REQUEST, so the agent learned to
+        # fly far (drift↑) then hover forever to farm +1.16/step (80% of steps,
+        # SR=0).  Fix: positive stop reward ONLY for STOP+REQUEST (drift high
+        # → plan is stale → request); STOP+inflight (waiting for result) is
+        # neutral; STOP+no-inflight (dry hover) is a constant penalty.
+        drift_thresh = float(args.scheduler_motion_drift_thresh_m)
+        w_motion = float(args.scheduler_motion_cont_weight)
+        if orig_motion_stop:
+            if orig_request_edge:
+                # STOP+REQUEST: drift high → plan stale → request is correct.
+                motion_shaping = w_motion * (state_drift_m - drift_thresh)
+            elif has_inflight:
+                # STOP+inflight: waiting for the in-flight result to land.
+                # Legitimate but not extra credit — keep neutral.
+                motion_shaping = 0.0
+            else:
+                # STOP+no-inflight: dry hover / reward-farming. Penalize.
+                motion_shaping = -float(args.scheduler_motion_stop_noreq_penalty)
+        else:
+            # CONTINUE: fly with low drift good, fly with high drift bad.
+            motion_shaping = -w_motion * (state_drift_m - drift_thresh)
+
+        reward = time_penalty + illegal_penalty + terminal_reward + req_shaping + motion_shaping
         return reward, {
-            "ne_progress": ne_progress_reward,
             "time": time_penalty,
-            "state_drift_delta": drift_penalty,
-            "time_drift_delta": time_drift_penalty,
-            "request": request_penalty,
-            "request_bw": request_bw_penalty,
             "illegal_action": illegal_penalty,
             "terminal": terminal_reward,
+            "req_shaping": req_shaping,
+            "motion_shaping": motion_shaping,
         }
 
     def _build_observation(self, observed_bandwidth_bps: Optional[float] = None) -> np.ndarray:
         assert self.state is not None
         if observed_bandwidth_bps is None:
             observed_bandwidth_bps = self.last_observed_bandwidth_bps
-        next_distance = self._next_waypoint_distance_m()
-        cur_ne = self._current_ne_m()
-        ne_norm = float(getattr(args, "scheduler_ne_state_norm_m", None) or 100.0)
+        # pilot7 5-dim state: every feature maps to one reward condition.
+        # [buffer, bw, inflight, time_drift(trajectory age), drift]
         obs = np.asarray(
             [
                 float(self._buffer_remaining()) / BUFFER_REMAINING_NORM,
-                next_distance / NEXT_WAYPOINT_DISTANCE_NORM_M,
                 float(observed_bandwidth_bps) / BANDWIDTH_NORM_BPS,
                 1.0 if self.planner is not None and self.planner.has_inflight() else 0.0,
+                self._current_time_drift_ms() / TIME_DRIFT_NORM_MS,
                 self._current_drift_m() / float(args.scheduler_drift_norm_m or STATE_DRIFT_NORM_M),
-                self._current_time_drift_ms() / float(args.scheduler_time_drift_norm_ms or TIME_DRIFT_NORM_MS),
-                (cur_ne / ne_norm) if cur_ne is not None else 10.0,  # Critic-only: NE
-                min(float(self.scheduler_step_count - self._last_request_step), 10.0) / 10.0,  # request age
             ],
             dtype=np.float32,
         )

@@ -97,7 +97,10 @@ def prepare_data_to_traj_model(episodes, waypoints, image_processor, rot_to_targ
             target = np.array(rot).T @ np.array(rot_0) @ np.array(rot_to_target) @ np.array(target)
         else:
             target = np.array(rot).T @ np.array(rot_0) @ np.array(target)
-        image_list.append(info[-1]['rgb'][0])
+        _rgb = next((o['rgb'] for o in reversed(info) if 'rgb' in o), None)
+        if _rgb is None:
+            raise KeyError('rgb: no frame carries rgb in trajectory batch')
+        image_list.append(_rgb[0])
         target_list.append(target)
     images = np.stack(image_list, axis=0)
     image = image_processor.preprocess(images, return_tensors='pt')['pixel_values']

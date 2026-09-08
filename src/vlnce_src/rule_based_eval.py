@@ -558,6 +558,14 @@ class ContinuousEpisodeState:
             self.episode.append(observation)
             self.last_observation_timestamp = ts
             self.distance_to_ends.append(self._calculate_distance(observation))
+        # keep 1024x1024 record frames only on newest episode entry
+        # DinoMonitor/comm_delay/collision read only latest obs; older copies
+        # of record frames are never written to disk - pure memory growth
+        if len(self.episode) > 1:
+            for e in self.episode[:-1]:
+                if 'rgb_record' in e:
+                    e.pop('rgb_record', None)
+                    e.pop('depth_record', None)
 
     def _calculate_distance(self, observation: Dict[str, Any]) -> float:
         return float(
@@ -580,6 +588,14 @@ class ContinuousEpisodeState:
         if bool(getattr(sim_state, "oracle_success", False)):
             self.oracle_success = True
         self.distance_to_ends.append(self._calculate_distance_from_position(self.current_sim_pose()))
+        # keep 1024x1024 record frames only on newest episode entry
+        # DinoMonitor/comm_delay/collision read only latest obs; older copies
+        # of record frames are never written to disk - pure memory growth
+        if len(self.episode) > 1:
+            for e in self.episode[:-1]:
+                if 'rgb_record' in e:
+                    e.pop('rgb_record', None)
+                    e.pop('depth_record', None)
 
     REQUEST_REGRESSION_COUNT = 10
 
