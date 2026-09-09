@@ -15,6 +15,7 @@ DATASET_PATH="${DATASET_PATH:-/HDD2/TravelUAV_dataset/TravelUAV_data}"
 export NCN_DISABLE_BITSANDBYTES="${NCN_DISABLE_BITSANDBYTES:-1}"
 export PYTHONPATH="${ROOT_DIR}/tools/ncn_python_shim${PYTHONPATH:+:${PYTHONPATH}}"
 if [[ -n "${NCN_CONDA_ENV:-}" ]]; then
+  export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
   source "${CONDA_SH:-/home/zt/miniconda3/etc/profile.d/conda.sh}"
   conda activate "${NCN_CONDA_ENV}"
 fi
