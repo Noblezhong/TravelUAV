@@ -139,9 +139,15 @@ class MatchEnv(DRLSchedulerEnv):
         extra["action_illegal"] = action_illegal
         extra["action_illegal_reason"] = illegal_reason
         if action_illegal:
-            # override to the safe fallback: STOP_REQUEST
-            motion_stop, request_edge = True, True
-            extra["action_override"] = "STOP_REQUEST"
+            # fallback: never re-request while one is in flight — LatestOnly
+            # submit() would overwrite/discard the in-flight job.  With inflight
+            # -> STOP_NO_REQUEST (wait in place); otherwise request as before.
+            if self.planner.has_inflight():
+                motion_stop, request_edge = True, False
+                extra["action_override"] = "STOP_NO_REQUEST"
+            else:
+                motion_stop, request_edge = True, True
+                extra["action_override"] = "STOP_REQUEST"
         # ─────────────────────────────────────────────────────────────
 
         if motion_stop:
@@ -149,18 +155,30 @@ class MatchEnv(DRLSchedulerEnv):
                 request_bw = observed_bw
                 self._stop_and_request(observed_bw, extra)
             else:
-                # STOP_NO_REQUEST: _check_action_legal guarantees inflight exists.
-                # (If inflight were absent the action would be illegal and
-                # overridden to STOP_REQUEST above.)
-                wait_start = time.perf_counter()
-                wait_logical_start = self.clock.now_ms
-                result = self.planner.wait_result()
-                extra["hover_wait_ms"] = float(
-                    self.clock.now_ms - wait_logical_start
-                    if self.clock.enabled
-                    else (time.perf_counter() - wait_start) * 1000.0
-                )
-                self._apply_result(result)
+                # STOP_NO_REQUEST: with inflight -> wait for the result to land.
+                # Without inflight (legal hover-in-place) -> advance the logical
+                # clock one idle step; wait_result() on an empty queue would
+                # deadlock, so must branch on has_inflight().
+                if self.planner.has_inflight():
+                    wait_start = time.perf_counter()
+                    wait_logical_start = self.clock.now_ms
+                    result = self.planner.wait_result()
+                    extra["hover_wait_ms"] = float(
+                        self.clock.now_ms - wait_logical_start
+                        if self.clock.enabled
+                        else (time.perf_counter() - wait_start) * 1000.0
+                    )
+                    self._apply_result(result)
+                else:
+                    wait_start = time.perf_counter()
+                    wait_logical_start = self.clock.now_ms
+                    self.clock.advance_blocking(float(args.scheduler_idle_wait_ms))
+                    extra["hover_no_inflight"] = True
+                    extra["hover_wait_ms"] = float(
+                        self.clock.now_ms - wait_logical_start
+                        if self.clock.enabled
+                        else (time.perf_counter() - wait_start) * 1000.0
+                    )
         else:
             if self._buffer_remaining() <= 0:
                 request_bw = observed_bw
