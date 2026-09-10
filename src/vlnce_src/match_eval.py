@@ -181,9 +181,15 @@ class MatchEnv(DRLSchedulerEnv):
         extra["action_illegal"] = action_illegal
         extra["action_illegal_reason"] = illegal_reason
         if action_illegal:
-            # override to the safe fallback: STOP_REQUEST
-            motion_stop, request_edge = True, True
-            extra["action_override"] = "STOP_REQUEST"
+            # fallback: never re-request while one is in flight — LatestOnly
+            # submit() would overwrite/discard the in-flight job.  With inflight
+            # -> STOP_NO_REQUEST (wait in place); otherwise request as before.
+            if self.planner.has_inflight():
+                motion_stop, request_edge = True, False
+                extra["action_override"] = "STOP_NO_REQUEST"
+            else:
+                motion_stop, request_edge = True, True
+                extra["action_override"] = "STOP_REQUEST"
         # ─────────────────────────────────────────────────────────────
 
         if motion_stop:
