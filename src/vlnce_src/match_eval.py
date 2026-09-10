@@ -191,18 +191,32 @@ class MatchEnv(DRLSchedulerEnv):
                 request_bw = observed_bw
                 self._stop_and_request(observed_bw, extra)
             else:
-                # STOP_NO_REQUEST: _check_action_legal guarantees inflight exists.
-                # (If inflight were absent the action would be illegal and
-                # overridden to STOP_REQUEST above.)
-                wait_start = time.perf_counter()
-                wait_logical_start = self.clock.now_ms
-                result = self.planner.wait_result()
-                extra["hover_wait_ms"] = float(
-                    self.clock.now_ms - wait_logical_start
-                    if self.clock.enabled
-                    else (time.perf_counter() - wait_start) * 1000.0
-                )
-                self._apply_result(result)
+                # STOP_NO_REQUEST: with inflight → wait for the in-flight
+                # result to land.  Without inflight (pilot9 made this action
+                # always legal) → hover in place one step: advance the logical
+                # clock so the bandwidth trace evolves, submit nothing, block
+                # nothing.  wait_result() on an empty queue would deadlock,
+                # so must branch on has_inflight().
+                if self.planner.has_inflight():
+                    wait_start = time.perf_counter()
+                    wait_logical_start = self.clock.now_ms
+                    result = self.planner.wait_result()
+                    extra["hover_wait_ms"] = float(
+                        self.clock.now_ms - wait_logical_start
+                        if self.clock.enabled
+                        else (time.perf_counter() - wait_start) * 1000.0
+                    )
+                    self._apply_result(result)
+                else:
+                    wait_start = time.perf_counter()
+                    wait_logical_start = self.clock.now_ms
+                    self.clock.advance_blocking(float(args.scheduler_idle_wait_ms))
+                    extra["hover_no_inflight"] = True
+                    extra["hover_wait_ms"] = float(
+                        self.clock.now_ms - wait_logical_start
+                        if self.clock.enabled
+                        else (time.perf_counter() - wait_start) * 1000.0
+                    )
         else:
             if self._buffer_remaining() <= 0:
                 request_bw = observed_bw
