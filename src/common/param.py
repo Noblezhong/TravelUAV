@@ -67,15 +67,15 @@ class CommonArguments:
     ncn_max_consecutive_actions: int = field(default=200, metadata={"help": "safety cap for consecutive NCN actions while edge guidance is pending"})
     scheduler_vf_coef: float = field(default=0.5, metadata={"help": "PPO value function coefficient (0.2 = stabilized Critic)"})
     scheduler_seed: Optional[int] = field(default=None, metadata={"help": "PPO seed for reproducible baseline/pilot runs (None = random)"})
-    # --- pilot8+ continuous shaping (weights default 0.0 = inactive; activate via train/eval scripts) ---
-    scheduler_req_bw_thresh_mbps: float = field(default=25.0, metadata={"help": "pilot7: bandwidth threshold in Mbps; bw ≥ this counts as 'high bandwidth'"})
-    scheduler_req_buf_thresh: float = field(default=3.0, metadata={"help": "pilot7: buffer > this counts as 'sufficient' (requesting it is penalized)"})
-    scheduler_motion_drift_thresh_m: float = field(default=2.5, metadata={"help": "pilot7: drift threshold (m) for the motion shaping rules"})
-    scheduler_motion_cont_weight: float = field(default=0.0, metadata={"help": "pilot8: continuous motion shaping weight; motion_shaping = w*(drift-thresh)*(stop?+1:-1)"})
-    scheduler_req_bw_weight: float = field(default=0.0, metadata={"help": "pilot8: continuous req bandwidth weight; bw_term = w*(bw-bw_ref)/bw_ref"})
-    scheduler_req_buf_weight: float = field(default=0.0, metadata={"help": "pilot8: continuous req buffer weight; buf_term = w*(buffer-buf_ref), subtracted from req"})
+    # --- pilot11 continuous shaping (weights default 0.0 = inactive; activate via train/eval scripts) ---
+    scheduler_req_bw_thresh_mbps: float = field(default=25.0, metadata={"help": "pilot7: bandwidth reference in Mbps; bw_term = w·clip((bw−ref)/ref,−1,+1)"})
+    scheduler_req_buf_thresh: float = field(default=3.0, metadata={"help": "pilot7: buffer reference; buffer > this counts as 'sufficient' (requesting it is penalized)"})
+    scheduler_motion_drift_thresh_m: float = field(default=2.5, metadata={"help": "deprecated since pilot11 (Δ removed from the reward gradient); kept only so legacy scripts parse"})
+    scheduler_motion_cont_weight: float = field(default=0.0, metadata={"help": "pilot11: flat CONTINUE flight bonus +w_cont, independent of Δ; STOP+REQUEST/STOP+inflight = 0, STOP+dry-hover = −stop_noreq_penalty"})
+    scheduler_req_bw_weight: float = field(default=0.0, metadata={"help": "pilot11: req bandwidth weight; bw_term = w·clip((bw−bw_ref)/bw_ref, −1, +1) (bounded, was unbounded pre-pilot11)"})
+    scheduler_req_buf_weight: float = field(default=0.0, metadata={"help": "pilot11: req buffer weight; buf_term = w·(buffer−buf_ref), subtracted from req → full buffer suppresses request"})
     scheduler_req_inflight_penalty: float = field(default=0.0, metadata={"help": "pilot8: penalty for requesting while a request is already inflight"})
-    scheduler_motion_stop_noreq_penalty: float = field(default=0.0, metadata={"help": "pilot10: constant penalty for STOP_NO_REQUEST with no inflight (dry hover / reward-hacking); STOP+REQUEST and STOP+inflight keep their own terms"})
+    scheduler_motion_stop_noreq_penalty: float = field(default=0.0, metadata={"help": "pilot10: constant penalty for STOP_NO_REQUEST with no inflight (dry hover / reward-farming); STOP+REQUEST and STOP+inflight have been neutral (0) since pilot11"})
     ncn_edge_timeout_ms: float = field(default=0.0, metadata={"help": "optional logical edge timeout for NCN takeover; 0 disables it"})
     ncn_outage_duration_ms: float = field(default=0.0, metadata={"help": "optional outage immediately after cold start; 0 disables it"})
 
