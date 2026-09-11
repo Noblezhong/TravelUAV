@@ -804,15 +804,18 @@ class DRLSchedulerEnv(gym.Env):
         orig_request_edge: bool = False,
         orig_motion_stop: bool = False,
     ) -> Tuple[float, Dict[str, float]]:
-        """r_task + r_req + r_motion (pilot8 continuous shaping).
+        """r_task + r_req + r_motion (pilot11: Δ out of the gradient).
 
-        time / illegal / terminal (r_task) are unchanged from pilot7. Only the
-        two shaping terms are rewritten to continuous form:
-          motion:  w_motion · (drift − thr) · (stop ? +1 : −1)
-          req:     req · [ w_bw·(bw−bw_ref)/bw_ref − w_buf·(buffer−buf_ref) ]
+        time / illegal / terminal (r_task) are unchanged from pilot7. pilot11
+        removes the Δ (state_drift) axis from the shaping terms entirely — it
+        stays in obs as an input but no longer steers the policy. Goal: the
+        policy should time its stop/request purely on buffer × bandwidth.
+          motion:  CONTINUE → +w_cont (flat); STOP+REQUEST / STOP+inflight → 0;
+                   STOP+dry-hover → −stop_noreq_penalty
+          req:     req · [ w_bw·clip((bw−bw_ref)/bw_ref, −1, +1) − w_buf·(buffer−buf_ref) ]
                    − w_inflight · req · inflight
         All judged on the ORIGINAL intent (pre-legality override) and the
-        PRE-action decision state, same as pilot7.
+        PRE-action decision state, same as pilot7/8.
         """
         # ── r_task (unchanged) ────────────────────────────────────────
         time_penalty = -float(args.scheduler_time_weight) * elapsed_ms / float(args.scheduler_time_norm_ms)
@@ -831,28 +834,34 @@ class DRLSchedulerEnv(gym.Env):
                 terminal_reward = -float(args.scheduler_failure_penalty)
 
         # ── r_req shaping (continuous bandwidth × buffer) ─────────────
+        # pilot11: bw term bounded to [−w_bw, +w_bw]. pilot10's unbounded
+        # w·(bw−ref)/ref averaged ≈ +1.56 at training bw (mean ~90 Mbps over
+        # iid log-uniform(5,400)), swamping every other term → "always request"
+        # was near-optimal and bandwidth adaptivity washed out.
         req_shaping = 0.0
         if orig_request_edge:
             bw_ref_bps = float(args.scheduler_req_bw_thresh_mbps) * 1e6
             buf_ref = float(args.scheduler_req_buf_thresh)
-            bw_term = float(args.scheduler_req_bw_weight) * (observed_bw - bw_ref_bps) / bw_ref_bps
+            bw_term = float(args.scheduler_req_bw_weight) * float(
+                np.clip((observed_bw - bw_ref_bps) / bw_ref_bps, -1.0, 1.0)
+            )
             buf_term = float(args.scheduler_req_buf_weight) * (buffer_remaining - buf_ref)
             inflight_penalty = float(args.scheduler_req_inflight_penalty) if has_inflight else 0.0
             req_shaping = bw_term - buf_term - inflight_penalty
 
-        # ── r_motion shaping (pilot10: stop-type discrimination) ─────
-        # pilot9 exposed a reward hack: STOP_NO_REQUEST with no inflight got
-        # the same +w·(drift−thresh) as STOP_REQUEST, so the agent learned to
-        # fly far (drift↑) then hover forever to farm +1.16/step (80% of steps,
-        # SR=0).  Fix: positive stop reward ONLY for STOP+REQUEST (drift high
-        # → plan is stale → request); STOP+inflight (waiting for result) is
-        # neutral; STOP+no-inflight (dry hover) is a constant penalty.
-        drift_thresh = float(args.scheduler_motion_drift_thresh_m)
-        w_motion = float(args.scheduler_motion_cont_weight)
+        # ── r_motion (pilot11: Δ removed, flat flight bonus) ──────────
+        # pilot10 rewarded CONTINUE with −w·(drift−2.5), monotone-increasing in
+        # Δ∈[0,2.5] and capped at Δ=0 — freezing (hover, Δ=0, no flight needed)
+        # was the cheapest way to hold the reward. Δ is a self-manipulable axis,
+        # so it must not be a gradient direction (pilot9/10 hacking lesson).
+        # pilot11: CONTINUE is a flat +w_cont; STOP+REQUEST / STOP+inflight are
+        # neutral (the value of a request lives in r_req + future time saving);
+        # STOP+dry-hover keeps its explicit penalty.
+        w_cont = float(args.scheduler_motion_cont_weight)
         if orig_motion_stop:
             if orig_request_edge:
-                # STOP+REQUEST: drift high → plan stale → request is correct.
-                motion_shaping = w_motion * (state_drift_m - drift_thresh)
+                # STOP+REQUEST: value is in the request itself, not Δ.
+                motion_shaping = 0.0
             elif has_inflight:
                 # STOP+inflight: waiting for the in-flight result to land.
                 # Legitimate but not extra credit — keep neutral.
@@ -861,8 +870,9 @@ class DRLSchedulerEnv(gym.Env):
                 # STOP+no-inflight: dry hover / reward-farming. Penalize.
                 motion_shaping = -float(args.scheduler_motion_stop_noreq_penalty)
         else:
-            # CONTINUE: fly with low drift good, fly with high drift bad.
-            motion_shaping = -w_motion * (state_drift_m - drift_thresh)
+            # CONTINUE: flat flight bonus — progress is enforced by the time
+            # penalty (detours burn E2E) and terminal rewards, not by Δ.
+            motion_shaping = w_cont
 
         reward = time_penalty + illegal_penalty + terminal_reward + req_shaping + motion_shaping
         return reward, {
