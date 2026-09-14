@@ -381,6 +381,37 @@ class AirVLNENV:
         self.sim_states = states
         return obs
 
+    def get_trajcorr_front_rgb_observation(self):
+        """Fetch TCM's front RGB directly from AirSim at edge resolution.
+
+        Same ownership pattern as ``get_aerodpo_rgb_observations``: the
+        traj-DNN correction consumes a frame it fetched itself instead of
+        depending on the state observer's newest episode entry carrying
+        ``rgb``.  Does not call ``get_obs`` and does not mutate ``sim_states``.
+        """
+        responses = self._fetch_images(
+            self.simulator_tool.getImageResponses,
+            ["FrontCamera"],
+            "getTrajcorrFrontRgbObservation",
+        )
+        if responses is None:
+            raise RuntimeError("TCM front RGB fetch failed")
+        observations = []
+        index = 0
+        for machine_responses in responses:
+            for response in machine_responses:
+                rgb_images = response[0]
+                if len(rgb_images) != 1:
+                    raise RuntimeError("TCM requires FrontCamera")
+                observations.append({
+                    "rgb": rgb_images,
+                    "state": copy.deepcopy(self.sim_states[index].state),
+                })
+                index += 1
+        if len(observations) != self.batch_size:
+            raise RuntimeError("TCM front RGB batch size mismatch")
+        return observations
+
     def get_aerodpo_rgb_observations(self):
         """Fetch NCN's two RGB views without changing the normal VLN observer.
 

@@ -44,10 +44,13 @@ class TrajcorrMixin:
     def regenerate_trajectory(
         self,
         episodes,
+        front_rgb,
         coarse_goal_world,
         coarse_local,
         observation_pose,
     ):
+        """``front_rgb`` is the raw FrontCamera image TCM fetched itself (the
+        edge-observer's episode frames are not guaranteed to carry ``rgb``)."""
         latest = episodes[0][-1]
         target = build_trajcorr_target(
             latest["sensors"]["state"]["position"][0:3],
@@ -56,7 +59,7 @@ class TrajcorrMixin:
             coarse_local,
             observation_pose,
         )
-        images = np.stack([episodes[0][-1]["rgb"][0]], axis=0)
+        images = np.stack([front_rgb], axis=0)
         model_dtype = next(self.traj_model.parameters()).dtype
         image = self.image_processor.preprocess(images, return_tensors="pt")["pixel_values"]
         image = image.to(device=self.model.device, dtype=model_dtype)
@@ -286,8 +289,17 @@ class TcmRuntime:
 
         regen_start = time.perf_counter()
         try:
+            front_frame = eval_env.get_trajcorr_front_rgb_observation()[0]
+        except RuntimeError:
+            # AirSim fetch failed twice inside _fetch_images — keep flying the
+            # original guidance instead of killing the episode loop
+            self.stats.correction_fallbacks["front_rgb_fetch_failed"] += 1
+            tcm_extra["trajcorr_fallback_reason"] = "front_rgb_fetch_failed"
+            return None
+        try:
             world_waypoints, profile = model_wrapper.regenerate_trajectory(
                 [state.episode],
+                front_frame["rgb"][0],
                 coarse_goal_world,
                 coarse_local,
                 base_result.observation_pose,
