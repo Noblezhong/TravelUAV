@@ -87,6 +87,11 @@ class PlannerResult:
     submitted_logical_ms: Optional[float] = None
     edge_arrival_logical_ms: Optional[float] = None
     ready_logical_ms: Optional[float] = None
+    # Coarse VLM goal that produced this result, kept so downstream correction
+    # (TCM) can re-derive its virtual goal without another edge round-trip.
+    # ``None`` on failures and on planners that do not profile the coarse stage.
+    coarse_local: Optional[List[float]] = None
+    coarse_goal_world: Optional[List[float]] = None
 
 
 STOP_AND_REQUEST = "STOP_AND_REQUEST"

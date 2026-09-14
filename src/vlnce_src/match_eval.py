@@ -135,6 +135,35 @@ class MatchEnv(DRLSchedulerEnv):
         super()._apply_result(effective)
         self._tcm_step_extras.update(tcm_extra)
 
+    def _maybe_correct_mid_execution(self):
+        """Execution-time TCM gate (Algorithm 1 IF branch, while still flying).
+
+        ``_apply_result`` gates on the shift of a newly arrived result; under
+        stop-and-wait scheduling the UAV is motionless during the wait, so that
+        shift is identically zero and the correction never opens.  This gate
+        measures the shift of the guidance being executed (``state_drift_m``)
+        and runs the same correction branch mid-flight.  Returns the effective
+        result, or ``None`` when nothing was corrected.
+
+        The corrected result is installed without recording a REQUEST cycle:
+        no REQUEST is issued here, so consuming a ``request_ne_history`` slot
+        would corrupt the NE-regression termination check.
+        """
+        if self.active_result is None:
+            return None
+        effective, tcm_extra = self.tcm_runtime.maybe_correct_mid_execution(
+            state=self.state,
+            eval_env=self.eval_env,
+            model_wrapper=self.model_wrapper,
+            clock=self.clock,
+            active_result=self.active_result,
+        )
+        self._tcm_step_extras.update(tcm_extra)
+        if effective is None:
+            return None
+        super()._apply_result(effective, record_request_ne=False)
+        return effective
+
     # ── Legacy AHS+TCM path, retained bit-for-bit when NCN is disabled ─
     def step(self, action):
         if not self._ncn_enabled:
@@ -159,6 +188,14 @@ class MatchEnv(DRLSchedulerEnv):
         applied = self._poll_and_apply_result()
         if applied is not None:
             extra["trajectory_switch_applied_before_action"] = True
+        # ── TCM execution-time gate ──────────────────────────────────
+        # Runs before the action is decoded: if the guidance being flown has
+        # drifted past delta_cor, correct it now (re-observe + regenerate)
+        # instead of waiting for the next result to arrive.  Firing here also
+        # activates the target lock, so the very same step routes into the
+        # lock branch below.
+        if self._maybe_correct_mid_execution() is not None:
+            extra["tcm_mid_exec_correction"] = True
         if self.target_lock.active:
             return self._step_target_lock(observed_bw, step_start, step_logical_start)
 

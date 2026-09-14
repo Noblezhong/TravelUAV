@@ -140,6 +140,7 @@ def eval(
                         executed_since_decision = 0
                         active_traj: List[List[float]] = []
                         active_index = 0
+                        active_result: Optional[Any] = None
                         pending_snapshot: Optional[Snapshot] = None
 
                         warmup_snapshot = state.build_snapshot(request_counter, control_step)
@@ -159,6 +160,7 @@ def eval(
                         )
                         active_traj = copy.deepcopy(warmup_result.refined_waypoints)
                         active_index = 0
+                        active_result = warmup_result
                         state.record_request_ne()
                         current_pose = state.current_sim_pose()
                         warmup_record = _build_planner_decision_record(
@@ -249,6 +251,7 @@ def eval(
                                 else:
                                     active_traj = copy.deepcopy(applied_result.refined_waypoints)
                                     active_index = 0
+                                    active_result = applied_result
                                     trajectory_switch_applied = True
                                     current_pose = state.current_sim_pose()
                                     if pending_snapshot is not None and not planner.has_inflight() and not tcm.lock_active:
@@ -285,6 +288,58 @@ def eval(
                                         applied_result.request_id,
                                         applied_result.llm_output,
                                         applied_result.refined_waypoints,
+                                        current_pose=current_pose,
+                                    )
+
+                            # ── TCM execution-time gate ──────────────────────
+                            # Fires while the guidance is still being flown: the
+                            # shift that matters is the one accumulated since the
+                            # guidance's own uplink, not the one sampled when a
+                            # later result happens to land.  A correction
+                            # re-observes + regenerates locally and enters the
+                            # target lock; the locked buffer is then executed by
+                            # the branch below.
+                            if active_result is not None and active_index < len(active_traj):
+                                effective, mid_extra = tcm.maybe_correct_mid_execution(
+                                    state=state,
+                                    eval_env=eval_env,
+                                    model_wrapper=model_wrapper,
+                                    clock=episode_clock,
+                                    active_result=active_result,
+                                )
+                                if effective is not None:
+                                    active_result = effective
+                                    active_traj = copy.deepcopy(effective.refined_waypoints)
+                                    active_index = 0
+                                    trajectory_switch_applied = True
+                                    current_pose = state.current_sim_pose()
+                                    decision_record = _build_planner_decision_record(
+                                        env_batchs[0],
+                                        effective,
+                                        current_pose,
+                                        enable_comm_delay,
+                                        chunk_waypoints,
+                                        decision_step=int(effective.request_id),
+                                        clock=episode_clock,
+                                        applied_exec_step=control_step,
+                                    )
+                                    decision_record["predict_dones"] = [bool(x) for x in state.predict_dones]
+                                    decision_record["collisions"] = [bool(x) for x in state.collisions]
+                                    decision_record["dones"] = [bool(x) for x in state.dones]
+                                    decision_record.update(mid_extra)
+                                    decision_record["hover_wait_ms"] = (
+                                        float(decision_record.get("hover_wait_ms", 0.0))
+                                        + float(mid_extra.get("trajcorr_refresh_obs_ms", 0) or 0)
+                                        + float(mid_extra.get("trajcorr_regen_ms", 0) or 0)
+                                    )
+                                    _write_jsonl_line(profile_fp, decision_record)
+                                    summary_records.append(decision_record)
+                                    _print_decision_profile_line(episode_idx, effective.request_id, decision_record)
+                                    _print_trajectory_bundle(
+                                        episode_idx,
+                                        effective.request_id,
+                                        effective.llm_output,
+                                        effective.refined_waypoints,
                                         current_pose=current_pose,
                                     )
 
@@ -402,6 +457,7 @@ def eval(
                                     tcm.stats.lock_completions[lock_completion] += 1
                                     active_traj = []
                                     active_index = 0
+                                    active_result = None
                                     executed_since_decision = 0
                                 if state.dones[0] and dino_predicted_this_step and not state.collisions[0]:
                                     stop_pose = state.current_sim_pose()
@@ -446,6 +502,7 @@ def eval(
                                     tcm.stats.lock_completions[completion] += 1
                                     active_traj = []
                                     active_index = 0
+                                    active_result = None
                                     executed_since_decision = 0
                                     continue
                                 if not state.dones[0]:
@@ -484,6 +541,7 @@ def eval(
                                     continue
                                 active_traj = copy.deepcopy(applied_result.refined_waypoints)
                                 active_index = 0
+                                active_result = applied_result
                                 current_pose = state.current_sim_pose()
                                 record = _build_planner_decision_record(
                                     env_batchs[0],

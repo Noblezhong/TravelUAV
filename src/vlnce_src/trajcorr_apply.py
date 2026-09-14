@@ -92,6 +92,7 @@ class TcmEpisodeStats:
 
     def __init__(self):
         self.corrected_applies = 0
+        self.mid_exec_corrections = 0
         self.stale_dropped = 0
         self.lock_completions: Counter = Counter()
         self.correction_fallbacks: Counter = Counter()
@@ -99,6 +100,7 @@ class TcmEpisodeStats:
     def as_dict(self) -> Dict[str, Any]:
         return {
             "tcm_corrected_applies": int(self.corrected_applies),
+            "tcm_mid_exec_corrections": int(self.mid_exec_corrections),
             "tcm_stale_dropped": int(self.stale_dropped),
             "tcm_lock_completions": dict(self.lock_completions),
             "tcm_correction_fallbacks": dict(self.correction_fallbacks),
@@ -182,6 +184,95 @@ class TcmRuntime:
             self.stats.correction_fallbacks[fallback_reason] += 1
             tcm_extra["trajcorr_fallback_reason"] = fallback_reason
             return result, tcm_extra
+
+        effective = self._run_correction(
+            state,
+            eval_env,
+            model_wrapper,
+            clock,
+            coarse,
+            current_pose,
+            result,
+            tcm_extra,
+            record_request_ne=record_request_ne,
+        )
+        if effective is None:
+            return result, tcm_extra
+        return effective, tcm_extra
+
+    def maybe_correct_mid_execution(self, state, eval_env, model_wrapper, clock, active_result):
+        """Execution-time correction gate (shift of the guidance being flown).
+
+        ``apply_result`` gates on the state shift of a **newly arrived** result.
+        When the scheduler stops and waits for the edge, the UAV does not move
+        during the wait, so that shift is identically zero and the correction
+        branch never opens.  This entry point instead gates on the shift of the
+        guidance **currently being executed** — the quantity the paradigm
+        reports as ``state_drift_m`` — and runs the same correction branch while
+        the UAV is still flying.
+
+        Returns ``(effective_result, tcm_extra)``; ``effective_result`` is
+        ``None`` when no correction was applied and the caller must keep
+        executing the current buffer.
+        """
+        tcm_extra: Dict[str, Any] = {}
+        if not self.enabled or self.lock_active or active_result is None:
+            return None, tcm_extra
+        if state.dones[0]:
+            return None, tcm_extra
+
+        current_pose = state.current_sim_pose()
+        decision = select_trajectory_mode(
+            True,
+            active_result.observation_pose,
+            current_pose,
+            self.delta_cor_m,
+        )
+        tcm_extra["trajectory_mode"] = decision.mode
+        tcm_extra["state_shift_mid_exec_m"] = float(decision.state_shift_m)
+        if decision.mode == TRAJECTORY_ORIGINAL:
+            return None, tcm_extra
+
+        coarse, fallback_reason = derive_trajcorr_inputs(active_result)
+        if coarse is None:
+            self.stats.correction_fallbacks[fallback_reason] += 1
+            tcm_extra["trajcorr_fallback_reason"] = fallback_reason
+            return None, tcm_extra
+
+        effective = self._run_correction(
+            state,
+            eval_env,
+            model_wrapper,
+            clock,
+            coarse,
+            current_pose,
+            active_result,
+            tcm_extra,
+        )
+        if effective is None:
+            return None, tcm_extra
+        self.stats.mid_exec_corrections += 1
+        return effective, tcm_extra
+
+    def _run_correction(
+        self,
+        state,
+        eval_env,
+        model_wrapper,
+        clock,
+        coarse,
+        current_pose,
+        base_result,
+        tcm_extra: Dict[str, Any],
+        record_request_ne: bool = False,
+    ):
+        """Refresh observation -> regenerate trajectory -> begin target lock.
+
+        Shared body of both correction gates.  ``base_result`` only supplies the
+        observation frame and the latency bookkeeping; the returned result is a
+        shallow copy with ``refined_waypoints`` replaced.  Returns ``None`` when
+        the correction bailed out and the caller must keep ``base_result``.
+        """
         coarse_goal_world, coarse_local = coarse
 
         obs_ms = self.refresh_observation(state, eval_env, clock)
@@ -191,7 +282,7 @@ class TcmRuntime:
             # regenerate a trajectory for a finished episode
             self.stats.correction_fallbacks["dones_after_refresh"] += 1
             tcm_extra["trajcorr_fallback_reason"] = "dones_after_refresh"
-            return result, tcm_extra
+            return None
 
         regen_start = time.perf_counter()
         try:
@@ -199,18 +290,18 @@ class TcmRuntime:
                 [state.episode],
                 coarse_goal_world,
                 coarse_local,
-                result.observation_pose,
+                base_result.observation_pose,
             )
         except ValueError:
             self.stats.correction_fallbacks["regeneration_value_error"] += 1
             tcm_extra["trajcorr_fallback_reason"] = "regeneration_value_error"
-            return result, tcm_extra
+            return None
         regen_ms = float((time.perf_counter() - regen_start) * 1000.0)
         clock.advance_blocking(regen_ms)
 
         waypoints = np.asarray(world_waypoints[0]).tolist()
         completion = self.target_lock.begin(
-            result.observation_pose,
+            base_result.observation_pose,
             current_pose,
             coarse_goal_world,
         )
@@ -226,9 +317,9 @@ class TcmRuntime:
         if record_request_ne and not state.dones[0]:
             state.record_request_ne()
 
-        effective = copy.copy(result)
+        effective = copy.copy(base_result)
         effective.refined_waypoints = [list(p) for p in filtered]
-        effective.traj_latency_ms = float(result.traj_latency_ms) + regen_ms
+        effective.traj_latency_ms = float(base_result.traj_latency_ms) + regen_ms
         if effective.ready_logical_ms is not None:
             effective.ready_logical_ms = float(effective.ready_logical_ms) + regen_ms
         tcm_extra.update(
@@ -245,4 +336,4 @@ class TcmRuntime:
                 "p5_to_virtual_goal_m": profile.get("p5_to_virtual_goal_m"),
             }
         )
-        return effective, tcm_extra
+        return effective

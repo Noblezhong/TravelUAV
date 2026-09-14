@@ -302,6 +302,10 @@ class FixedBandwidthEdgePlanner:
             uplink_payload_mb=float(payload_mb),
             uplink_bandwidth_mbps=float(job.bandwidth_bps / 1_000_000.0),
             uplink_latency_ms=float(uplink_latency_ms),
+            # Carry the coarse goal the LLM stage produced: TCM re-derives its
+            # virtual goal from it, and the profiled wrapper already computed it.
+            coarse_local=copy.deepcopy(model_profile["coarse_local"][0]),
+            coarse_goal_world=copy.deepcopy(model_profile["coarse_goal_world"][0]),
             llm_output=copy.deepcopy(model_profile["llm_output"]),
             refined_waypoints=copy.deepcopy(refined_waypoints[0]),
             submitted_logical_ms=snapshot.submitted_logical_ms,
@@ -670,7 +674,7 @@ class DRLSchedulerEnv(gym.Env):
         self.last_observed_bandwidth_bps = float(self.bandwidth_trace.bandwidth_at_ms(elapsed_ms))
         return self.last_observed_bandwidth_bps
 
-    def _apply_result(self, result: PlannerResult) -> None:
+    def _apply_result(self, result: PlannerResult, *, record_request_ne: bool = True) -> None:
         result.applied_logical_ms = self.clock.now_ms if self.clock.enabled else None
         result.applied_exec_step = int(self.control_step)
         self.active_result = result
@@ -678,7 +682,12 @@ class DRLSchedulerEnv(gym.Env):
         self.active_index = 0
         # Every result application = one completed REQUEST cycle.
         # Record NE for per-REQUEST distance regression.
-        if self.state is not None and not self.state.dones[0]:
+        #
+        # ``record_request_ne=False`` is passed by TCM's mid-flight correction:
+        # it re-observes and regenerates a trajectory locally, without issuing a
+        # REQUEST, so counting it as a REQUEST cycle would feed the stall
+        # detector a sample that no request produced.
+        if record_request_ne and self.state is not None and not self.state.dones[0]:
             self.state.record_request_ne()
 
     def _poll_and_apply_result(self) -> Optional[PlannerResult]:
