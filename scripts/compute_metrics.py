@@ -290,8 +290,10 @@ def extract_action_line(path: Path, invalid: list[int], method: str, wait_mode: 
                 if wait_mode == "approved":
                     wait_parts[ep].append(_number(record, "execution_post_obs_latency_ms", 0.0))
                     wait_parts[ep].append(_number(record, "execution_post_dino_latency_ms", 0.0))
-            if wait_mode == "approved":
-                # hover_wait_ms appears on decision and execution records alike
+            if wait_mode == "approved" and kind in ("decision", "decision_stop"):
+                # A single hover event is written to both the decision and the
+                # execution record of the same loop iteration, carrying the
+                # identical value. Count it once, on the decision side only.
                 wait_parts[ep].append(_number(record, "hover_wait_ms", 0.0))
         else:  # stopgo: every non-terminal record is an executed step
             time_ms = _number(record, "action_age_ms")
@@ -335,11 +337,14 @@ def extract_rule(path: Path, invalid: list[int]) -> tuple[dict, dict, int]:
                 raise ValueError(f"duplicate terminal episode {ep}")
             terminals[ep] = record
             continue
-        # hover_wait_ms is emitted on both decision and execution records
-        # for the rule-based paradigm; sum both.
-        hover = _number(record, "hover_wait_ms", 0.0)
-        if hover > 0:
-            hover_wait_ms[ep] += hover
+        # A single hover event is written to both the decision and the
+        # execution record of the same loop iteration, carrying the identical
+        # value. Summing both would count the same wait twice; count it once,
+        # on the decision side only.
+        if kind in ("decision", "decision_stop"):
+            hover = _number(record, "hover_wait_ms", 0.0)
+            if hover > 0:
+                hover_wait_ms[ep] += hover
         if kind == "decision":
             time_ms = _number(record, "action_age_ms")
             state_m = _number(record, "state_drift_m")
