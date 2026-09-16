@@ -76,8 +76,8 @@ def main():
 
     pbar = tqdm.tqdm(total=total_episodes)
     completed = 0
-    try:
-        while completed < total_episodes:
+    while completed < total_episodes:
+        try:
             obs, _ = gym_env.reset()
             pbar.update(1)
 
@@ -211,40 +211,40 @@ def main():
             )
 
             completed += 1
-    except Exception:
-        # 单场景异常隔离：任何 wedge/crash 只判该场景失败，评估继续，绝不整批报废
-        logger.error(f"[ep {completed:04d}] episode crashed - isolating and continuing", exc_info=True)
-        _already = any(r.get("record_type") == "episode_end" and r.get("episode_idx") == gym_env.episode_idx for r in gym_env.summary_records)
-        if not _already:
-            try:
-                gym_env._finalize_episode("crash")
-            except Exception:
-                logger.error(f"[ep {completed:04d}] crash finalize failed, writing minimal episode_end", exc_info=True)
-                _record = {
-                    "record_type": "episode_end",
-                    "episode_idx": int(gym_env.episode_idx),
-                    "seq_names": [gym_env.env_batch[0]["seq_name"]] if gym_env.env_batch else [],
-                    "map_names": [gym_env.env_batch[0]["map_name"]] if gym_env.env_batch else [],
-                    "terminal_reason": "crash",
-                    "success": False,
-                    "oracle_success": False,
-                    "collision": False,
-                    "control_steps": 0,
-                    "scheduler_steps": 0,
-                    "final_ne_m": None,
-                    "episode_latency_ms": 0.0,
-                    "num_episode_records": 0,
-                }
+        except Exception:
+            # 单场景异常隔离：任何 wedge/crash 只判该场景失败，评估继续，绝不整批报废
+            logger.error(f"[ep {completed:04d}] episode crashed - isolating and continuing", exc_info=True)
+            _already = any(r.get("record_type") == "episode_end" and r.get("episode_idx") == gym_env.episode_idx for r in gym_env.summary_records)
+            if not _already:
                 try:
-                    gym_env.profile_fp.write(json.dumps(_record, ensure_ascii=False) + "\n")
-                    gym_env.profile_fp.flush()
-                    gym_env.summary_records.append(_record)
+                    gym_env._finalize_episode("crash")
                 except Exception:
-                    logger.error(f"[ep {completed:04d}] minimal record write failed", exc_info=True)
-        # 半死状态彻底剥离：下一集 reset() 会重建全新 state
-        gym_env.state = None
-        pbar.update(1)
-        completed += 1
+                    logger.error(f"[ep {completed:04d}] crash finalize failed, writing minimal episode_end", exc_info=True)
+                    _record = {
+                        "record_type": "episode_end",
+                        "episode_idx": int(gym_env.episode_idx),
+                        "seq_names": [gym_env.env_batch[0]["seq_name"]] if gym_env.env_batch else [],
+                        "map_names": [gym_env.env_batch[0]["map_name"]] if gym_env.env_batch else [],
+                        "terminal_reason": "crash",
+                        "success": False,
+                        "oracle_success": False,
+                        "collision": False,
+                        "control_steps": 0,
+                        "scheduler_steps": 0,
+                        "final_ne_m": None,
+                        "episode_latency_ms": 0.0,
+                        "num_episode_records": 0,
+                    }
+                    try:
+                        gym_env.profile_fp.write(json.dumps(_record, ensure_ascii=False) + "\n")
+                        gym_env.profile_fp.flush()
+                        gym_env.summary_records.append(_record)
+                    except Exception:
+                        logger.error(f"[ep {completed:04d}] minimal record write failed", exc_info=True)
+            # 半死状态彻底剥离：下一集 reset() 会重建全新 state
+            gym_env.state = None
+            pbar.update(1)
+            completed += 1
     pbar.close()
 
     gym_env.write_summary()
