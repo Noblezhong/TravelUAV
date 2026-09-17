@@ -5,7 +5,7 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 artifact_dir="${AERODPO_GGUF_DIR:?Set AERODPO_GGUF_DIR to the external Q8 artifact directory}"
 run_id="${RUN_ID:-$(date +%m%d-%H%M)}"
 
-source /home/zt/miniconda3/etc/profile.d/conda.sh
+source "${CONDA_SH:-/home/zt/miniconda3/etc/profile.d/conda.sh}"
 conda activate "${NCN_CONDA_ENV:-llamauav}"
 export NCN_DISABLE_BITSANDBYTES="${NCN_DISABLE_BITSANDBYTES:-1}"
 export PYTHONPATH="${root_dir}/tools/ncn_python_shim${PYTHONPATH:+:${PYTHONPATH}}"
