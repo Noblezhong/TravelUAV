@@ -227,15 +227,40 @@ def extract_ppo(path: Path, invalid: list[int]) -> tuple[dict, dict, int]:
                 shifts[ep].append((time_ms / 1000.0, state_m))
             continue
 
-        # scheduler_step: sample shift at actual application points
-        if record.get("trajectory_switch_applied_before_action"):
+        # scheduler_step: sample shift at actual application points.
+        #
+        # Shift scope (user decision 2026-09-17): ONLY the AHS scheduling
+        # loop guidance applications count toward time/state shift.
+        # Module-internal events are excluded because they do NOT measure
+        # misalignment of an applied result:
+        #   - TCM exec-time corrections (trajectory_mode == "corrected"):
+        #     the recorded drift is the staleness of the REPLACED guidance,
+        #     i.e. the correction trigger condition (>= delta_cor by design),
+        #     not the correction own observation age.
+        #   - NCN-controlled steps (control_source in {"ncn",
+        #     "edge_recovery"}): applications only happen at recovery
+        #     landing, and their age includes the NCN hold/outage window,
+        #     not the guidance own latency. NOTE: recovery landings are
+        #     tagged control_source == "edge_recovery" (not "ncn") on the
+        #     step that applies the recovery result (ncn_active=True,
+        #     ncn_recovery_reason set).
+        # AGENT REMINDER: keep this exclusion when editing extract_ppo, and
+        # keep the markers set at the source (trajcorr_apply.py writes
+        # trajectory_mode on both TCM paths; match_eval.py _log_ncn_event
+        # writes control_source). Dropping it silently inflates MATCH rows:
+        # 2026-09-16 run, 1418 eps: 5.67s/2.05m with module events vs
+        # 3.65s/0.04m without (verified both ways; TCM 2212 + NCN 6118
+        # events excluded, all other metrics unaffected).
+        if record.get("trajectory_switch_applied_before_action") and record.get("trajectory_mode") != "corrected":
             time_ms = _number(record, "time_drift_before_ms")
             state_m = _number(record, "state_drift_before_m")
             if time_ms is not None and state_m is not None:
                 shifts[ep].append((time_ms / 1000.0, state_m))
         applied_ms = record.get("result_applied_logical_ms")
-        if isinstance(applied_ms, (int, float)) and math.isclose(
-            float(applied_ms), float(record.get("logical_elapsed_ms", 0.0)), abs_tol=EPSILON_MS
+        if (
+            isinstance(applied_ms, (int, float))
+            and math.isclose(float(applied_ms), float(record.get("logical_elapsed_ms", 0.0)), abs_tol=EPSILON_MS)
+            and record.get("control_source") not in ("ncn", "edge_recovery")
         ):
             time_ms = _number(record, "time_drift_ms")
             state_m = _number(record, "state_drift_m")
@@ -452,6 +477,9 @@ def build_result(
         "mean_logical_E2E_s": statistics.fmean(e["e2e_latency_s"] for e in episodes),
         "time_shift_s": _fmean([e["time_shift_s"] for e in episodes if e["time_shift_s"] is not None]),
         "state_shift_m": _fmean([e["state_shift_m"] for e in episodes if e["state_shift_m"] is not None]),
+        # Self-describing scope marker: shift excludes TCM-trigger and NCN
+        # module-internal events (see extract_ppo comment, 2026-09-17).
+        "shift_scope": "ahs_applications_only",
         # Main table rows PPO/rule/continuous/stop-go average over all episodes;
         # the two TC rows (TC-OFF 19.48, TC-ON 92.81) average only over episodes
         # that experienced any wait. --wait-denominator reproduces either.
